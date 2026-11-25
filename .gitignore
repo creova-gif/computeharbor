@@ -18,6 +18,7 @@ __pycache__/
 .agents/
 .gstack/
 .audit/
+.worktrees/
 
 # Secrets & OS files
 .env

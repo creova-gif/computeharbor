@@ -144,3 +144,118 @@ func TestConcurrentCoordinatorAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestHeartbeatAndWorkerMismatch(t *testing.T) {
+	now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	coord := NewCoordinator().WithClock(func() time.Time { return now })
+
+	if _, err := coord.Heartbeat("missing", "w1"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("missing job Heartbeat = %v, want ErrJobNotFound", err)
+	}
+
+	if _, err := coord.SubmitJob("job-hb", "org-1", cost.GPUL4, 10, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.Heartbeat("job-hb", "w1"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("queued job Heartbeat = %v, want ErrInvalidTransition", err)
+	}
+
+	assigned, err := coord.AssignWorker("job-hb", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !assigned.LastHeartbeatAt.Equal(now) {
+		t.Fatalf("AssignWorker LastHeartbeatAt = %v, want %v", assigned.LastHeartbeatAt, now)
+	}
+
+	if _, err := coord.Heartbeat("job-hb", "w2"); !errors.Is(err, ErrWorkerMismatch) {
+		t.Fatalf("mismatched worker Heartbeat = %v, want ErrWorkerMismatch", err)
+	}
+
+	now = now.Add(15 * time.Second)
+	hb, err := coord.Heartbeat("job-hb", "w1")
+	if err != nil {
+		t.Fatalf("valid Heartbeat failed: %v", err)
+	}
+	if !hb.LastHeartbeatAt.Equal(now) || !hb.UpdatedAt.Equal(now) {
+		t.Fatalf("Heartbeat timestamps not updated: LastHeartbeatAt=%v UpdatedAt=%v want=%v", hb.LastHeartbeatAt, hb.UpdatedAt, now)
+	}
+	if hb.Status != StatusRunning {
+		t.Fatalf("Heartbeat status = %s, want %s", hb.Status, StatusRunning)
+	}
+}
+
+func TestReapStaleLeasesAndMaxPreemptions(t *testing.T) {
+	now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	coord := NewCoordinator().WithClock(func() time.Time { return now })
+
+	if _, err := coord.SubmitJob("job-fresh", "org-1", cost.GPUL4, 10, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.SubmitJob("job-stale", "org-1", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.SubmitJob("job-queued", "org-1", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := coord.AssignWorker("job-fresh", "w-fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-stale", "w-stale"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-positive TTL does not reap anything.
+	if got := coord.ReapStaleLeases(0); len(got) != 0 {
+		t.Fatalf("ReapStaleLeases(0) = %d, want 0", len(got))
+	}
+
+	// Advance 20s and refresh only job-fresh.
+	now = now.Add(20 * time.Second)
+	if _, err := coord.Heartbeat("job-fresh", "w-fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance another 15s: job-stale is 35s old (>30s), job-fresh is 15s old (<=30s).
+	now = now.Add(15 * time.Second)
+	reaped := coord.ReapStaleLeases(30 * time.Second)
+	if len(reaped) != 1 || reaped[0].JobID != "job-stale" {
+		t.Fatalf("ReapStaleLeases = %+v, want only job-stale", reaped)
+	}
+	if reaped[0].Status != StatusMigrating {
+		t.Fatalf("reaped status = %s, want %s", reaped[0].Status, StatusMigrating)
+	}
+	if reaped[0].PreemptionCount != 1 {
+		t.Fatalf("reaped PreemptionCount = %d, want 1", reaped[0].PreemptionCount)
+	}
+	if reaped[0].WorkerNodeID != "" {
+		t.Fatalf("reaped WorkerNodeID = %q, want empty", reaped[0].WorkerNodeID)
+	}
+	if !reaped[0].PreemptedAt.Equal(now) {
+		t.Fatalf("reaped PreemptedAt = %v, want %v", reaped[0].PreemptedAt, now)
+	}
+
+	// Reassign job-stale, let it go stale again: PreemptionCount (1) >= MaxPreemptions (1) -> StatusFailed.
+	now = now.Add(5 * time.Second)
+	if _, err := coord.AssignWorker("job-stale", "w-stale-2"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(40 * time.Second)
+	if _, err := coord.Heartbeat("job-fresh", "w-fresh"); err != nil {
+		t.Fatal(err)
+	}
+	reaped = coord.ReapStaleLeases(30 * time.Second)
+	if len(reaped) != 1 || reaped[0].JobID != "job-stale" {
+		t.Fatalf("second ReapStaleLeases = %+v, want only job-stale", reaped)
+	}
+	if reaped[0].Status != StatusFailed {
+		t.Fatalf("max-preemption reaped status = %s, want %s", reaped[0].Status, StatusFailed)
+	}
+	if reaped[0].PreemptionCount != 2 {
+		t.Fatalf("max-preemption PreemptionCount = %d, want 2", reaped[0].PreemptionCount)
+	}
+	if reaped[0].WorkerNodeID != "" {
+		t.Fatalf("max-preemption WorkerNodeID = %q, want empty", reaped[0].WorkerNodeID)
+	}
+}

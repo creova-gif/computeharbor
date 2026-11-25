@@ -25,12 +25,12 @@ where = ["worker/src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["worker/src"]
-testpaths = ["worker/tests", "tests/chaos"]
+testpaths = ["worker/tests", "tests/chaos", "tests/e2e"]
 
 [tool.mypy]
 strict = true
 mypy_path = "worker/src"
-files = ["worker/src", "worker/tests", "tests/chaos"]
+files = ["worker/src", "worker/tests", "tests/chaos", "tests/e2e"]
 
 [[tool.mypy.overrides]]
 module = ["safetensors.*"]

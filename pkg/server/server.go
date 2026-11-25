@@ -46,6 +46,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/assign", s.handleAssignWorker)
+	s.mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/sigterm", s.handleNotifySIGTERM)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/checkpoint", s.handleCommitCheckpoint)
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
@@ -79,6 +80,7 @@ type jobLeaseResponse struct {
 	MaxPreemptions    int                         `json:"max_preemptions"`
 	LatestCheckpoint  *orchestrator.CheckpointRef `json:"latest_checkpoint,omitempty"`
 	UpdatedAt         time.Time                   `json:"updated_at"`
+	LastHeartbeatAt   *time.Time                  `json:"last_heartbeat_at,omitempty"`
 	PreemptedAt       *time.Time                  `json:"preempted_at,omitempty"`
 	LastRecoveryDurMs int64                       `json:"last_recovery_dur_ms,omitempty"`
 }
@@ -97,6 +99,10 @@ func toJobLeaseResponse(lease orchestrator.JobLease) jobLeaseResponse {
 		LatestCheckpoint:  lease.LatestCheckpoint,
 		UpdatedAt:         lease.UpdatedAt,
 		LastRecoveryDurMs: lease.LastRecoveryDurMs,
+	}
+	if !lease.LastHeartbeatAt.IsZero() {
+		t := lease.LastHeartbeatAt
+		resp.LastHeartbeatAt = &t
 	}
 	if !lease.PreemptedAt.IsZero() {
 		t := lease.PreemptedAt
@@ -170,6 +176,30 @@ func (s *Server) handleAssignWorker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lease, err := s.coord.AssignWorker(id, req.WorkerNodeID)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toJobLeaseResponse(lease))
+}
+
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.authorizeJob(w, r, id); !ok {
+		return
+	}
+
+	var req assignWorkerRequest
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.WorkerNodeID) == "" {
+		writeError(w, http.StatusBadRequest, "worker_node_id is required")
+		return
+	}
+
+	lease, err := s.coord.Heartbeat(id, req.WorkerNodeID)
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -280,7 +310,8 @@ func writeDomainError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, orchestrator.ErrJobExists),
 		errors.Is(err, orchestrator.ErrInvalidTransition),
-		errors.Is(err, orchestrator.ErrMaxPreemptions):
+		errors.Is(err, orchestrator.ErrMaxPreemptions),
+		errors.Is(err, orchestrator.ErrWorkerMismatch):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, orchestrator.ErrInvalidStep),
 		errors.Is(err, cost.ErrUnknownGPU),

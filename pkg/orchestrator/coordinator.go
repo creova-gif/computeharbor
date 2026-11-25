@@ -26,6 +26,7 @@ var (
 	ErrInvalidTransition = errors.New("invalid state transition")
 	ErrMaxPreemptions    = errors.New("exceeded maximum preemption retries")
 	ErrInvalidStep       = errors.New("checkpoint step cannot regress")
+	ErrWorkerMismatch    = errors.New("worker node id does not match active lease")
 )
 
 type CheckpointRef struct {
@@ -50,6 +51,7 @@ type JobLease struct {
 	MaxPreemptions    int
 	LatestCheckpoint  *CheckpointRef
 	UpdatedAt         time.Time
+	LastHeartbeatAt   time.Time
 	PreemptedAt       time.Time
 	LastRecoveryDurMs int64
 }
@@ -120,8 +122,61 @@ func (c *Coordinator) AssignWorker(jobID, workerNodeID string) (JobLease, error)
 	}
 	job.WorkerNodeID = workerNodeID
 	job.Status = StatusRunning
+	job.LastHeartbeatAt = now
 	job.UpdatedAt = now
 	return cloneLease(job), nil
+}
+
+func (c *Coordinator) Heartbeat(jobID, workerNodeID string) (JobLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	if job.Status != StatusRunning {
+		return JobLease{}, fmt.Errorf("%w: cannot heartbeat job in state %s", ErrInvalidTransition, job.Status)
+	}
+	if job.WorkerNodeID != workerNodeID {
+		return JobLease{}, fmt.Errorf("%w: got %q, active %q", ErrWorkerMismatch, workerNodeID, job.WorkerNodeID)
+	}
+
+	now := c.now()
+	job.LastHeartbeatAt = now
+	job.UpdatedAt = now
+	return cloneLease(job), nil
+}
+
+func (c *Coordinator) ReapStaleLeases(ttl time.Duration) []JobLease {
+	if ttl <= 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.now()
+	var reaped []JobLease
+	for _, job := range c.jobs {
+		if job.Status != StatusRunning {
+			continue
+		}
+		if now.Sub(job.LastHeartbeatAt) <= ttl {
+			continue
+		}
+		if job.PreemptionCount >= job.MaxPreemptions {
+			job.Status = StatusFailed
+		} else {
+			job.Status = StatusMigrating
+		}
+		job.PreemptionCount++
+		job.PreemptedAt = now
+		job.UpdatedAt = now
+		job.WorkerNodeID = ""
+		reaped = append(reaped, cloneLease(job))
+	}
+	return reaped
 }
 
 func (c *Coordinator) NotifySIGTERM(jobID string) (JobLease, error) {

@@ -25,6 +25,7 @@ type leaseDTO struct {
 	PreemptionCount   int                         `json:"preemption_count"`
 	MaxPreemptions    int                         `json:"max_preemptions"`
 	LatestCheckpoint  *orchestrator.CheckpointRef `json:"latest_checkpoint"`
+	LastHeartbeatAt   *time.Time                  `json:"last_heartbeat_at"`
 	LastRecoveryDurMs int64                       `json:"last_recovery_dur_ms"`
 }
 
@@ -200,6 +201,7 @@ func TestTenantIsolationAndNotFound(t *testing.T) {
 	}{
 		{http.MethodGet, "/v1/jobs/job-iso", nil},
 		{http.MethodPost, "/v1/jobs/job-iso/assign", map[string]string{"worker_node_id": "w1"}},
+		{http.MethodPost, "/v1/jobs/job-iso/heartbeat", map[string]string{"worker_node_id": "w1"}},
 		{http.MethodPost, "/v1/jobs/job-iso/sigterm", nil},
 		{http.MethodPost, "/v1/jobs/job-iso/checkpoint", map[string]any{"step": 1}},
 	}
@@ -382,5 +384,67 @@ func TestRankCostEndpoint(t *testing.T) {
 	rec = doJSON(t, srv, http.MethodGet, "/v1/cost/rank?min_vram=-1", "", nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Errorf("min_vram=-1 = %d, want 422", rec.Code)
+	}
+}
+
+func TestHeartbeatEndpoint(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	coord := orchestrator.NewCoordinator().WithClock(func() time.Time { return now })
+	srv := server.New(coord)
+
+	rec := doJSON(t, srv, http.MethodPost, "/v1/jobs", "", map[string]any{
+		"job_id":          "job-hb-http",
+		"org_id":          "org-alpha",
+		"gpu":             string(cost.GPUL4),
+		"target_steps":    10,
+		"max_preemptions": 1,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("submit status = %d, want 201", rec.Code)
+	}
+
+	// Heartbeat before assignment -> 409 Conflict (invalid transition).
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-hb-http/heartbeat", "org-alpha", map[string]string{
+		"worker_node_id": "node-1",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("heartbeat while QUEUED = %d, want 409", rec.Code)
+	}
+
+	// Assign worker.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-hb-http/assign", "org-alpha", map[string]string{
+		"worker_node_id": "node-1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign status = %d, want 200", rec.Code)
+	}
+
+	// Missing worker_node_id -> 400 Bad Request.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-hb-http/heartbeat", "org-alpha", map[string]string{
+		"worker_node_id": "   ",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty worker_node_id = %d, want 400", rec.Code)
+	}
+
+	// Mismatched worker_node_id -> 409 Conflict.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-hb-http/heartbeat", "org-alpha", map[string]string{
+		"worker_node_id": "node-wrong",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("mismatched worker_node_id = %d, want 409", rec.Code)
+	}
+
+	// Valid heartbeat -> 200 OK with updated last_heartbeat_at.
+	now = now.Add(10 * time.Second)
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-hb-http/heartbeat", "org-alpha", map[string]string{
+		"worker_node_id": "node-1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid heartbeat = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	lease := decodeLease(t, rec)
+	if lease.LastHeartbeatAt == nil || !lease.LastHeartbeatAt.Equal(now) {
+		t.Fatalf("last_heartbeat_at = %v, want %v", lease.LastHeartbeatAt, now)
 	}
 }

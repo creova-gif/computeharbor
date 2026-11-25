@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
+	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
 )
@@ -31,5 +36,48 @@ func TestCLISingleQuoteAndRank(t *testing.T) {
 	}
 	if len(ranked) != 5 {
 		t.Errorf("len(ranked) = %d, want 5", len(ranked))
+	}
+}
+
+func TestServeSubcommandFlagError(t *testing.T) {
+	var buf bytes.Buffer
+	err := run([]string{"serve", "-unknown-flag"}, &buf)
+	if err == nil {
+		t.Fatal("expected error for unknown flag in serve subcommand")
+	}
+}
+
+func TestServeListenerHealthzAndShutdown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var buf bytes.Buffer
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveListener(ctx, ln, &buf)
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /healthz status = %d, want 200", resp.StatusCode)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("serveListener returned error: %v", err)
+	}
+	if !strings.Contains(buf.String(), addr) {
+		t.Errorf("expected listen log to contain %q, got %q", addr, buf.String())
 	}
 }

@@ -1,0 +1,38 @@
+VENV_BIN := .venv/bin
+PYTEST := $(VENV_BIN)/pytest
+MYPY := $(VENV_BIN)/mypy
+RUFF := $(VENV_BIN)/ruff
+
+BIN_DIR := bin
+BINARY := $(BIN_DIR)/computeharbor
+
+.PHONY: build test test-go test-py lint chaos clean
+
+build:
+	@mkdir -p $(BIN_DIR)
+	go build -o $(BINARY) ./control-plane/cmd/computeharbor
+
+test: test-go test-py
+
+test-go:
+	go test -race ./...
+
+test-py:
+	$(PYTEST) worker/tests
+
+chaos:
+	$(PYTEST) tests/chaos
+
+lint:
+	@unformatted="$$(gofmt -l pkg control-plane)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "Unformatted Go files:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	go vet ./...
+	$(RUFF) check worker tests
+	$(MYPY) --strict worker/src worker/tests tests/chaos
+
+clean:
+	rm -rf $(BIN_DIR) .pytest_cache .mypy_cache .ruff_cache

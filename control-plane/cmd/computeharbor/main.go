@@ -1,13 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
+	"github.com/creova-gif/computeharbor/pkg/orchestrator"
+	"github.com/creova-gif/computeharbor/pkg/server"
 )
 
 func main() {
@@ -18,6 +27,12 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "serve" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runServe(ctx, args[1:], out)
+	}
+
 	fs := flag.NewFlagSet("computeharbor", flag.ContinueOnError)
 	gpu := fs.String("gpu", string(cost.GPUL4), "GPU pool identifier")
 	count := fs.Int("count", 4, "Number of GPUs")
@@ -54,4 +69,51 @@ func run(args []string, out io.Writer) error {
 		return err
 	}
 	return enc.Encode(res)
+}
+
+func runServe(ctx context.Context, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("computeharbor serve", flag.ContinueOnError)
+	addr := fs.String("addr", ":8080", "HTTP listen address")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	return serveListener(ctx, ln, out)
+}
+
+func serveListener(ctx context.Context, ln net.Listener, out io.Writer) error {
+	srv := &http.Server{
+		Handler:           server.New(orchestrator.NewCoordinator()),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	fmt.Fprintf(out, "computeharbor control plane listening on %s\n", ln.Addr().String())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Serve(ln)
+	}()
+
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		err := <-errCh
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
 }

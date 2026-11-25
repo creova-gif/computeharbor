@@ -4,12 +4,13 @@ ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptib
 
 ## Architecture
 
-- [`control-plane/cmd/computeharbor/main.go`](control-plane/cmd/computeharbor/main.go): CLI for spot vs on-demand cost modeling and VRAM-filtered pool ranking.
+- [`control-plane/cmd/computeharbor/main.go`](control-plane/cmd/computeharbor/main.go): CLI for spot vs on-demand cost modeling, VRAM-filtered pool ranking, and the `serve` HTTP control plane (`computeharbor serve -addr :8080`).
+- [`pkg/server/server.go`](pkg/server/server.go): Stdlib `net/http` JSON API for job submission, worker lease assignment, `SIGTERM` preemption notifications, checkpoint commits, and `X-Org-ID` tenant isolation.
 - [`pkg/cost/calculator.go`](pkg/cost/calculator.go): Spot pricing catalog (NVIDIA L4, A10G, A100-40GB, A100-80GB, H100-80GB), preemption recovery overhead accounting, and net customer savings after the platform fee.
 - [`pkg/orchestrator/coordinator.go`](pkg/orchestrator/coordinator.go): Thread-safe job lease state machine (`QUEUED` -> `RUNNING` -> `CHECKPOINTING` -> `MIGRATING` -> `COMPLETED`) with idempotent `SIGTERM` handling and step-regression guards.
-- [`worker/src/computeharbor_worker/`](worker/src/computeharbor_worker/): Python 3.12+ worker that intercepts `SIGTERM`, writes LoRA weights and AdamW state to a temporary Safetensors file, calls `os.fsync`, atomically swaps `latest.json`, and verifies SHA-256 integrity on restore.
+- [`worker/src/computeharbor_worker/`](worker/src/computeharbor_worker/): Python 3.12+ worker that intercepts `SIGTERM`, syncs CUDA when available, writes LoRA weights and AdamW state to a temporary Safetensors file, calls `os.fsync`, atomically swaps `latest.json`, optionally replicates to an object-store mirror (`--remote-store-dir`), and verifies SHA-256 integrity on restore.
 - [`tests/chaos/test_sigterm_preemption.py`](tests/chaos/test_sigterm_preemption.py): Subprocess chaos harness that injects three OS `SIGTERM` signals into a live training run and checks bit-for-bit loss and weight parity against an uninterrupted baseline.
-- [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md): Architecture Decision Record for streaming LoRA + RNG checkpoints instead of full base weights.
+- [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md) and [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md): Architecture Decision Records for streaming LoRA + RNG checkpoints and the stdlib HTTP control-plane API.
 
 ## Measured benchmarks
 
@@ -39,18 +40,16 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 ## Reproduce all checks
 
 ```bash
-	# Go static analysis and race-detector unit tests
-	gofmt -l pkg control-plane
-	go vet ./...
-	go test -race -v ./...
+	# Run all linters, type checks, unit tests, and SIGTERM chaos tests
+	make lint
+	make test
+	make chaos
+
+	# Start the Go HTTP control plane
+	go run ./control-plane/cmd/computeharbor serve -addr :8080
 
 	# Rank spot GPU pools with >= 24 GB VRAM
 	go run ./control-plane/cmd/computeharbor -rank-vram 24 -count 4 -hours 24 -fee 0.12
-
-	# Python static analysis, strict typing, and chaos preemption suite
-	.venv/bin/ruff check worker tests
-	.venv/bin/mypy worker tests
-	.venv/bin/pytest -v
 
 	# Reproduce the 5-trial SIGTERM benchmark JSON report
 	PYTHONPATH=worker/src .venv/bin/python tests/chaos/test_sigterm_preemption.py
@@ -58,4 +57,4 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 
 ## Standards
 
-See [`AGENTS.md`](AGENTS.md), [`docs/adr/000-template.md`](docs/adr/000-template.md), [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+See [`AGENTS.md`](AGENTS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md), [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).

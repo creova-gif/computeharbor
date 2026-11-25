@@ -40,6 +40,8 @@ class CheckpointManifest(BaseModel):
     payload_sha256: str = Field(min_length=64, max_length=64)
     flush_duration_ms: float = Field(ge=0.0)
     preempted: bool = False
+    remote_uri: str | None = None
+    remote_upload_ms: float = Field(default=0.0, ge=0.0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     lora_config: LoRAConfig
     rng_state: RNGStatePayload

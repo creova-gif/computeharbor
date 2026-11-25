@@ -16,6 +16,11 @@ import numpy.typing as npt
 
 from computeharbor_worker.checkpoint import CheckpointManager
 from computeharbor_worker.models import CheckpointManifest, LoRAConfig, TrainingRunSummary
+from computeharbor_worker.storage import (
+    CheckpointStore,
+    LocalMirrorObjectStore,
+    cuda_synchronize_if_available,
+)
 
 FloatArray = npt.NDArray[np.float64]
 type SignalHandlerType = (
@@ -61,10 +66,11 @@ class LoRATrainer:
         job_id: str,
         config: LoRAConfig,
         checkpoint_dir: Path | str,
+        remote_store: CheckpointStore | None = None,
     ) -> None:
         self.job_id = job_id
         self.config = config
-        self.checkpoint_mgr = CheckpointManager(checkpoint_dir)
+        self.checkpoint_mgr = CheckpointManager(checkpoint_dir, remote_store=remote_store)
 
         base_rng = np.random.default_rng(config.base_seed)
         self.frozen_weight: FloatArray = base_rng.standard_normal(
@@ -122,6 +128,7 @@ class LoRATrainer:
         }
 
     def flush_checkpoint(self, *, preempted: bool) -> CheckpointManifest:
+        cuda_synchronize_if_available()
         return self.checkpoint_mgr.save(
             job_id=self.job_id,
             step=self.step,
@@ -260,12 +267,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--step-delay-sec", type=float, default=0.0)
     parser.add_argument("--ready-file", default="")
     parser.add_argument("--summary-out", default="")
+    parser.add_argument("--remote-store-dir", default="")
     args = parser.parse_args(argv)
 
+    remote_store: CheckpointStore | None = (
+        LocalMirrorObjectStore(Path(args.remote_store_dir)) if args.remote_store_dir else None
+    )
     trainer = LoRATrainer(
         job_id=args.job_id,
         config=LoRAConfig(),
         checkpoint_dir=Path(args.checkpoint_dir),
+        remote_store=remote_store,
     )
     ready_path = Path(args.ready_file) if args.ready_file else None
     result = trainer.train(

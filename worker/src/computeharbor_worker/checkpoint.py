@@ -13,6 +13,7 @@ import numpy.typing as npt
 from safetensors.numpy import load_file, save_file
 
 from computeharbor_worker.models import CheckpointManifest, LoRAConfig, RNGStatePayload
+from computeharbor_worker.storage import CheckpointStore
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -73,9 +74,14 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
 
 
 class CheckpointManager:
-    def __init__(self, checkpoint_dir: Path | str) -> None:
+    def __init__(
+        self,
+        checkpoint_dir: Path | str,
+        remote_store: CheckpointStore | None = None,
+    ) -> None:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.remote_store = remote_store
         self.reconcile_stale_temporaries()
 
     def reconcile_stale_temporaries(self) -> int:
@@ -112,6 +118,13 @@ class CheckpointManager:
         digest = hashlib.sha256(payload_bytes).hexdigest()
         flush_ms = (time.perf_counter() - t0) * 1000.0
 
+        remote_uri: str | None = None
+        remote_upload_ms = 0.0
+        if self.remote_store is not None:
+            upload_t0 = time.perf_counter()
+            remote_uri = self.remote_store.put_file(st_target, f"{job_id}/{st_filename}")
+            remote_upload_ms = round((time.perf_counter() - upload_t0) * 1000.0, 4)
+
         manifest = CheckpointManifest(
             job_id=job_id,
             step=step,
@@ -121,6 +134,8 @@ class CheckpointManager:
             payload_sha256=digest,
             flush_duration_ms=round(flush_ms, 4),
             preempted=preempted,
+            remote_uri=remote_uri,
+            remote_upload_ms=remote_upload_ms,
             lora_config=lora_config,
             rng_state=serialize_rng_state(py_rng_state, np_rng_state),
         )
@@ -131,6 +146,8 @@ class CheckpointManager:
 
         _atomic_write_bytes(step_manifest_path, manifest_bytes)
         _atomic_write_bytes(latest_manifest_path, manifest_bytes)
+        if self.remote_store is not None:
+            self.remote_store.put_file(step_manifest_path, f"{job_id}/{step_manifest_path.name}")
         return manifest
 
     def has_latest(self) -> bool:

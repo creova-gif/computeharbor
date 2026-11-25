@@ -1,0 +1,202 @@
+package orchestrator
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/creova-gif/computeharbor/pkg/cost"
+)
+
+type JobStatus string
+
+const (
+	StatusQueued        JobStatus = "QUEUED"
+	StatusRunning       JobStatus = "RUNNING"
+	StatusCheckpointing JobStatus = "CHECKPOINTING"
+	StatusMigrating     JobStatus = "MIGRATING"
+	StatusCompleted     JobStatus = "COMPLETED"
+	StatusFailed        JobStatus = "FAILED"
+)
+
+var (
+	ErrJobNotFound       = errors.New("job not found")
+	ErrJobExists         = errors.New("job already exists")
+	ErrInvalidTransition = errors.New("invalid state transition")
+	ErrMaxPreemptions    = errors.New("exceeded maximum preemption retries")
+	ErrInvalidStep       = errors.New("checkpoint step cannot regress")
+)
+
+type CheckpointRef struct {
+	Step           int       `json:"step"`
+	Epoch          int       `json:"epoch"`
+	Loss           float64   `json:"loss"`
+	SafetensorsURI string    `json:"safetensors_uri"`
+	ManifestURI    string    `json:"manifest_uri"`
+	FlushedAt      time.Time `json:"flushed_at"`
+	FlushLatencyMs int64     `json:"flush_latency_ms"`
+}
+
+type JobLease struct {
+	JobID             string
+	OrgID             string
+	GPU               cost.GPUType
+	WorkerNodeID      string
+	Status            JobStatus
+	TargetSteps       int
+	CurrentStep       int
+	PreemptionCount   int
+	MaxPreemptions    int
+	LatestCheckpoint  *CheckpointRef
+	UpdatedAt         time.Time
+	PreemptedAt       time.Time
+	LastRecoveryDurMs int64
+}
+
+type Coordinator struct {
+	mu   sync.RWMutex
+	jobs map[string]*JobLease
+	now  func() time.Time
+}
+
+func NewCoordinator() *Coordinator {
+	return &Coordinator{
+		jobs: make(map[string]*JobLease),
+		now:  time.Now,
+	}
+}
+
+func (c *Coordinator) WithClock(clock func() time.Time) *Coordinator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = clock
+	return c
+}
+
+func (c *Coordinator) SubmitJob(jobID, orgID string, gpu cost.GPUType, targetSteps, maxPreemptions int) (JobLease, error) {
+	if jobID == "" || orgID == "" || targetSteps <= 0 || maxPreemptions < 0 {
+		return JobLease{}, fmt.Errorf("%w: invalid job parameters", ErrInvalidTransition)
+	}
+	if _, err := cost.LookupQuote(gpu); err != nil {
+		return JobLease{}, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.jobs[jobID]; exists {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobExists, jobID)
+	}
+
+	lease := &JobLease{
+		JobID:          jobID,
+		OrgID:          orgID,
+		GPU:            gpu,
+		Status:         StatusQueued,
+		TargetSteps:    targetSteps,
+		MaxPreemptions: maxPreemptions,
+		UpdatedAt:      c.now(),
+	}
+	c.jobs[jobID] = lease
+	return cloneLease(lease), nil
+}
+
+func (c *Coordinator) AssignWorker(jobID, workerNodeID string) (JobLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	if job.Status != StatusQueued && job.Status != StatusMigrating {
+		return JobLease{}, fmt.Errorf("%w: cannot assign worker in state %s", ErrInvalidTransition, job.Status)
+	}
+
+	now := c.now()
+	if job.Status == StatusMigrating && !job.PreemptedAt.IsZero() {
+		job.LastRecoveryDurMs = now.Sub(job.PreemptedAt).Milliseconds()
+	}
+	job.WorkerNodeID = workerNodeID
+	job.Status = StatusRunning
+	job.UpdatedAt = now
+	return cloneLease(job), nil
+}
+
+func (c *Coordinator) NotifySIGTERM(jobID string) (JobLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	if job.Status == StatusCheckpointing || job.Status == StatusMigrating {
+		return cloneLease(job), nil
+	}
+	if job.Status != StatusRunning {
+		return JobLease{}, fmt.Errorf("%w: cannot preempt job in state %s", ErrInvalidTransition, job.Status)
+	}
+	if job.PreemptionCount >= job.MaxPreemptions {
+		job.Status = StatusFailed
+		job.UpdatedAt = c.now()
+		return cloneLease(job), ErrMaxPreemptions
+	}
+
+	now := c.now()
+	job.Status = StatusCheckpointing
+	job.PreemptionCount++
+	job.PreemptedAt = now
+	job.UpdatedAt = now
+	return cloneLease(job), nil
+}
+
+func (c *Coordinator) CommitCheckpoint(jobID string, ref CheckpointRef) (JobLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	if ref.Step < job.CurrentStep {
+		return JobLease{}, fmt.Errorf("%w: got %d, current %d", ErrInvalidStep, ref.Step, job.CurrentStep)
+	}
+	if job.Status != StatusRunning && job.Status != StatusCheckpointing {
+		return JobLease{}, fmt.Errorf("%w: cannot commit checkpoint in state %s", ErrInvalidTransition, job.Status)
+	}
+
+	cp := ref
+	job.LatestCheckpoint = &cp
+	job.CurrentStep = ref.Step
+	job.UpdatedAt = c.now()
+
+	if ref.Step >= job.TargetSteps {
+		job.Status = StatusCompleted
+	} else if job.Status == StatusCheckpointing {
+		job.Status = StatusMigrating
+		job.WorkerNodeID = ""
+	}
+	return cloneLease(job), nil
+}
+
+func (c *Coordinator) GetJob(jobID string) (JobLease, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	return cloneLease(job), nil
+}
+
+func cloneLease(src *JobLease) JobLease {
+	out := *src
+	if src.LatestCheckpoint != nil {
+		cp := *src.LatestCheckpoint
+		out.LatestCheckpoint = &cp
+	}
+	return out
+}

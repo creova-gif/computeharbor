@@ -1,0 +1,39 @@
+{
+  "trials": 5,
+  "total_preemptions_tested": 15,
+  "parity_failures": 0,
+  "flush_ms_median": 0.706,
+  "flush_ms_min": 0.639,
+  "flush_ms_max": 1.51,
+  "recovery_ms_median": 20.904,
+  "recovery_ms_min": 17.439,
+  "recovery_ms_max": 48.774,
+  "sla_ceiling_ms": 30000.0,
+  "sample_trial": {
+    "target_steps": 30,
+    "preemptions_injected": 3,
+    "preempted_at_steps": [
+      6,
+      10,
+      15
+    ],
+    "loss_curve_parity_100pct": true,
+    "adapter_a_sha256_parity": true,
+    "adapter_b_sha256_parity": true,
+    "initial_loss": 7.287314356801,
+    "final_loss": 7.154724961465,
+    "baseline_compute_ms": 7.604,
+    "flush_latencies_ms": [
+      0.675,
+      1.51,
+      0.815
+    ],
+    "recovery_latencies_ms": [
+      19.787,
+      48.774,
+      19.727
+    ],
+    "max_recovery_ms": 48.774,
+    "meets_30s_sla": true
+  }
+}

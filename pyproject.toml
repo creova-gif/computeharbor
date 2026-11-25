@@ -1,0 +1,37 @@
+[project]
+name = "computeharbor-worker"
+version = "0.1.0"
+description = "ComputeHarbor Spot-GPU & Edge LLM LoRA Checkpoint Worker"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "pydantic>=2.9",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["worker/src"]
+testpaths = ["worker/tests", "tests/chaos"]
+
+[tool.mypy]
+strict = true
+mypy_path = "worker/src"
+files = ["worker/src", "worker/tests", "tests/chaos"]
+
+[[tool.mypy.overrides]]
+module = ["safetensors.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

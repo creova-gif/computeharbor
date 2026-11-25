@@ -1,0 +1,25 @@
+# Build & binary outputs
+/computeharbor
+/bin/
+/dist/
+*.test
+*.out
+
+# Python virtualenvs & cache
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local agent & audit state
+.agents/
+.gstack/
+.audit/
+
+# Secrets & OS files
+.env
+.env.*
+.DS_Store

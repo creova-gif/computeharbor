@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,6 +94,28 @@ type serveConfig struct {
 	webhookURL       string
 	webhookSecret    string
 	apiKey           string
+	orgAPIKeys       map[string]string
+}
+
+func parseOrgAPIKeys(spec string) (map[string]string, error) {
+	if strings.TrimSpace(spec) == "" {
+		return nil, nil
+	}
+	out := make(map[string]string)
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		org, tok, ok := strings.Cut(part, "=")
+		org = strings.TrimSpace(org)
+		tok = strings.TrimSpace(tok)
+		if !ok || org == "" || tok == "" {
+			return nil, fmt.Errorf("invalid -org-api-keys entry %q: expected org_id=token", part)
+		}
+		if _, exists := out[tok]; exists {
+			return nil, fmt.Errorf("duplicate org API token for org %q", org)
+		}
+		out[tok] = org
+	}
+	return out, nil
 }
 
 func runServe(ctx context.Context, args []string, out io.Writer) error {
@@ -108,7 +131,12 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	webhookURL := fs.String("webhook-url", "", "Optional HTTP endpoint to receive signed lifecycle webhook events")
 	webhookSecret := fs.String("webhook-secret", "", "HMAC-SHA256 secret used to sign webhook payloads")
 	apiKey := fs.String("api-key", os.Getenv("COMPUTEHARBOR_API_KEY"), "Optional Bearer API key for HTTP authentication")
+	orgAPIKeysSpec := fs.String("org-api-keys", os.Getenv("COMPUTEHARBOR_ORG_API_KEYS"), "Optional comma-separated org1=tok1,org2=tok2 pairs for org-scoped Bearer authentication")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	orgAPIKeys, err := parseOrgAPIKeys(*orgAPIKeysSpec)
+	if err != nil {
 		return err
 	}
 
@@ -127,6 +155,7 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 		webhookURL:       *webhookURL,
 		webhookSecret:    *webhookSecret,
 		apiKey:           *apiKey,
+		orgAPIKeys:       orgAPIKeys,
 	})
 }
 
@@ -167,6 +196,9 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 	}
 	if cfg.apiKey != "" {
 		api.WithAPIKey(cfg.apiKey)
+	}
+	if len(cfg.orgAPIKeys) > 0 {
+		api.WithOrgAPIKeys(cfg.orgAPIKeys)
 	}
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	defer cancelReaper()

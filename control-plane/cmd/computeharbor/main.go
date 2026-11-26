@@ -83,15 +83,16 @@ func run(args []string, out io.Writer) error {
 }
 
 type serveConfig struct {
-	reapInterval   time.Duration
-	leaseTTL       time.Duration
-	stateFile      string
-	rateLimitRPS   float64
-	rateLimitBurst int
-	logJSON        bool
-	webhookURL     string
-	webhookSecret  string
-	apiKey         string
+	reapInterval     time.Duration
+	leaseTTL         time.Duration
+	stateFile        string
+	snapshotInterval time.Duration
+	rateLimitRPS     float64
+	rateLimitBurst   int
+	logJSON          bool
+	webhookURL       string
+	webhookSecret    string
+	apiKey           string
 }
 
 func runServe(ctx context.Context, args []string, out io.Writer) error {
@@ -100,6 +101,7 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	reapInterval := fs.Duration("reap-interval", 5*time.Second, "Background stale-lease reaper interval")
 	leaseTTL := fs.Duration("lease-ttl", 30*time.Second, "Worker heartbeat lease TTL before preemption")
 	stateFile := fs.String("state-file", "", "Optional path to persist coordinator JSON snapshot")
+	snapshotInterval := fs.Duration("snapshot-interval", 5*time.Second, "Background coordinator snapshot interval when -state-file is set")
 	rateLimitRPS := fs.Float64("rate-limit-rps", 0, "Per-org HTTP rate limit in requests per second (<= 0 disables)")
 	rateLimitBurst := fs.Int("rate-limit-burst", 20, "Per-org HTTP rate limit burst size")
 	logJSON := fs.Bool("log-json", true, "Emit structured JSON HTTP request logs to stderr")
@@ -115,15 +117,16 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	return serveListenerWithConfig(ctx, ln, out, serveConfig{
-		reapInterval:   *reapInterval,
-		leaseTTL:       *leaseTTL,
-		stateFile:      *stateFile,
-		rateLimitRPS:   *rateLimitRPS,
-		rateLimitBurst: *rateLimitBurst,
-		logJSON:        *logJSON,
-		webhookURL:     *webhookURL,
-		webhookSecret:  *webhookSecret,
-		apiKey:         *apiKey,
+		reapInterval:     *reapInterval,
+		leaseTTL:         *leaseTTL,
+		stateFile:        *stateFile,
+		snapshotInterval: *snapshotInterval,
+		rateLimitRPS:     *rateLimitRPS,
+		rateLimitBurst:   *rateLimitBurst,
+		logJSON:          *logJSON,
+		webhookURL:       *webhookURL,
+		webhookSecret:    *webhookSecret,
+		apiKey:           *apiKey,
 	})
 }
 
@@ -168,6 +171,7 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	defer cancelReaper()
 	reaperDone := api.StartReaper(reaperCtx, cfg.reapInterval, cfg.leaseTTL)
+	snapshotDone := api.StartSnapshotter(reaperCtx, cfg.stateFile, cfg.snapshotInterval)
 
 	srv := &http.Server{
 		Handler:           api,
@@ -188,6 +192,7 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 	case err := <-errCh:
 		cancelReaper()
 		<-reaperDone
+		<-snapshotDone
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
@@ -197,11 +202,13 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			cancelReaper()
 			<-reaperDone
+			<-snapshotDone
 			return err
 		}
 		err := <-errCh
 		cancelReaper()
 		<-reaperDone
+		<-snapshotDone
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}

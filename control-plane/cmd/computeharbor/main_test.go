@@ -453,3 +453,36 @@ func TestRunServeWebhookDelivery(t *testing.T) {
 		t.Fatalf("runServe returned error: %v", err)
 	}
 }
+
+func TestRunServeSnapshotIntervalFlag(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	statePath := filepath.Join(t.TempDir(), "periodic-state.json")
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runServe(ctx, []string{
+			"-addr", "127.0.0.1:0",
+			"-state-file", statePath,
+			"-snapshot-interval", "15ms",
+			"-log-json=false",
+		}, &out)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(statePath); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("expected periodic snapshot file at %s: %v", statePath, err)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("runServe returned error: %v", err)
+	}
+}

@@ -61,6 +61,7 @@ class ControlPlaneClient:
         self.api_key: str | None = (
             api_key if api_key is not None else os.environ.get("COMPUTEHARBOR_API_KEY")
         )
+        self.last_request_id: str | None = None
 
     def _request(
         self,
@@ -69,6 +70,7 @@ class ControlPlaneClient:
         *,
         payload: dict[str, Any] | None = None,
         include_org_header: bool = True,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         data: bytes | None = None
@@ -77,6 +79,8 @@ class ControlPlaneClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         if include_org_header:
             headers["X-Org-ID"] = self.org_id
+        if request_id:
+            headers["X-Request-ID"] = request_id
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -86,9 +90,16 @@ class ControlPlaneClient:
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                    self.last_request_id = (
+                        resp.headers.get("X-Request-ID") if resp.headers is not None else None
+                    )
                     raw = resp.read().decode("utf-8")
                 break
             except urllib.error.HTTPError as exc:
+                if exc.headers is not None:
+                    err_request_id = exc.headers.get("X-Request-ID")
+                    if err_request_id is not None:
+                        self.last_request_id = err_request_id
                 err_body = exc.read().decode("utf-8", errors="replace")
                 try:
                     parsed = json.loads(err_body)
@@ -130,6 +141,10 @@ class ControlPlaneClient:
     def healthz(self) -> dict[str, Any]:
         """Check control plane liveness via GET /healthz."""
         return self._request("GET", "/healthz", include_org_header=False)
+
+    def readyz(self) -> dict[str, Any]:
+        """Check control plane readiness via GET /readyz."""
+        return self._request("GET", "/readyz", include_org_header=False)
 
     def submit_job(
         self,

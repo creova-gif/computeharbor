@@ -40,7 +40,7 @@ Start the control plane, then run the Python quickstart ([`examples/quickstart.p
 | Command | Purpose | Key Flags |
 | --- | --- | --- |
 | `computeharbor` | Estimate spot vs on-demand cost or rank pools | `-gpu`, `-count`, `-hours`, `-preemptions`, `-recovery-sec`, `-fee`, `-rank-vram` |
-| `computeharbor serve` | Start the HTTP control-plane API & stale-lease reaper | `-addr`, `-reap-interval`, `-lease-ttl`, `-state-file`, `-rate-limit-rps`, `-rate-limit-burst`, `-log-json`, `-webhook-url`, `-webhook-secret`, `-api-key` |
+| `computeharbor serve` | Start the HTTP control-plane API & stale-lease reaper | `-addr`, `-reap-interval`, `-lease-ttl`, `-state-file`, `-snapshot-interval`, `-rate-limit-rps`, `-rate-limit-burst`, `-log-json`, `-webhook-url`, `-webhook-secret`, `-api-key` |
 | `computeharbor status` | Query org jobs or a single job lease as JSON | `-url`, `-org` (required), `-job` |
 | `computeharbor savings` | Rank multi-region spot fleet placements | `-url`, `-min-vram`, `-provider`, `-min-availability` |
 
@@ -78,6 +78,7 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 | `POST /v1/jobs/{id}/sigterm` | `X-Org-ID` | — | `200 OK` `JobLease` (`CHECKPOINTING`, idempotent) |
 | `POST /v1/jobs/{id}/checkpoint` | `X-Org-ID` | `step`, `epoch`, `loss`, `safetensors_uri`, `manifest_uri`, `flush_latency_ms` | `200 OK` `JobLease` (`MIGRATING` or `COMPLETED`) |
 | `POST /v1/jobs/{id}/cancel` | `X-Org-ID` | — | `200 OK` `JobLease` (`FAILED`, idempotent) |
+| `POST /v1/jobs/{id}/barrier` | `X-Org-ID` | `world_size`, `rank`, `step` | `200 OK` `BarrierResponse` (`all_ready`, `committed_step`) |
 | `GET /v1/cost/rank` | None | `min_vram`, `count`, `hours`, `fee` | `200 OK` ranked spot GPU pool quotes |
 | `GET /v1/fleet/rank` | None | `min_vram`, `provider`, `min_availability` | `200 OK` multi-region fleet placements |
 | `POST /v1/schedule` | `Content-Type: application/json` | `min_vram_gb`, `gpu_count`, `active_hours`, `fee_fraction`, `exclude_gpus` | `200 OK` selected pool + fallback alternatives |
@@ -85,7 +86,7 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 
 ### Server Configuration Flags (`computeharbor serve`)
 
-- `-state-file`: Path for atomic coordinator JSON snapshot persistence across restarts.
+- `-state-file` / `-snapshot-interval`: Path for atomic coordinator JSON snapshot persistence across restarts, and background snapshot cadence when `-state-file` is set (default `5s`).
 - `-reap-interval` / `-lease-ttl`: Background stale-lease reaper cadence (default `5s`) and heartbeat TTL (default `30s`).
 - `-rate-limit-rps` / `-rate-limit-burst`: Per-org token-bucket rate limiting (`0` disables; default burst `20`).
 - `-log-json`: Emit structured JSON HTTP request logs via `slog` to `stderr` (default `true`).
@@ -140,6 +141,17 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 | `nvidia-a100-40gb` | GCP (`us-central1`) | \$352.32 | \$105.64 | \$29.60 | \$135.25 | 70.01% | 61.61% |
 | `nvidia-a100-80gb` | AWS (`us-west-2`) | \$470.40 | \$136.40 | \$40.08 | \$176.48 | 71.00% | 62.48% |
 | `nvidia-h100-80gb` | GCP (`us-east4`) | \$825.60 | \$247.82 | \$69.33 | \$317.15 | 69.98% | 61.59% |
+
+### Control Plane Throughput (Go Benchmarks)
+
+Measured on Apple M5 (`Darwin arm64`, `make bench`):
+
+| Benchmark | Result |
+| --- | --- |
+| `BenchmarkCalculate-10` | `38.35 ns/op` |
+| `BenchmarkRankFleet-10` | `1383 ns/op` |
+| `BenchmarkCoordinatorSubmitAndHeartbeat-10` | `479.3 ns/op` |
+| `BenchmarkCoordinatorReapStaleLeases-10` | `9071 ns/op` |
 
 ## Reproduce All Checks
 

@@ -102,6 +102,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/jobs/{id}/checkpoint", s.handleCommitCheckpoint)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.handleCancelJob)
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
+	s.mux.HandleFunc("GET /v1/fleet/rank", s.handleRankFleet)
 	s.mux.HandleFunc("POST /v1/schedule", s.handleSchedule)
 }
 
@@ -401,7 +402,10 @@ func writeDomainError(w http.ResponseWriter, err error) {
 		errors.Is(err, cost.ErrInvalidCount),
 		errors.Is(err, cost.ErrInvalidFee),
 		errors.Is(err, cost.ErrRecoveryWindow),
-		errors.Is(err, cost.ErrNegativePreemption):
+		errors.Is(err, cost.ErrNegativePreemption),
+		errors.Is(err, cost.ErrInvalidVRAM),
+		errors.Is(err, cost.ErrInvalidAvailability),
+		errors.Is(err, cost.ErrUnknownProvider):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")

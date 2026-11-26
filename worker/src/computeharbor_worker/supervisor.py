@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from computeharbor_worker.client import ControlPlaneClient
 from computeharbor_worker.daemon import run_worker_daemon
 from computeharbor_worker.models import LoRAConfig
-from computeharbor_worker.storage import CheckpointStore
+from computeharbor_worker.storage import CheckpointStore, LocalMirrorObjectStore
 from computeharbor_worker.trainer import RunResult
 
 type WorkerRunner = Callable[[str, int], RunResult]
@@ -101,3 +104,48 @@ def run_job_with_failover(
     raise RuntimeError(
         f"Job {job_id} did not complete within {max_attempts} attempts"
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for running a supervised spot job with automatic failover."""
+    parser = argparse.ArgumentParser(description="ComputeHarbor Spot Job Failover Supervisor")
+    parser.add_argument("--control-plane-url", required=True)
+    parser.add_argument("--org-id", required=True)
+    parser.add_argument("--job-id", required=True)
+    parser.add_argument("--gpu", default="nvidia-l4-24gb")
+    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--target-steps", type=int, default=30)
+    parser.add_argument("--max-preemptions", type=int, default=3)
+    parser.add_argument("--worker-prefix", default="worker")
+    parser.add_argument("--heartbeat-interval-sec", type=float, default=0.5)
+    parser.add_argument("--step-delay-sec", type=float, default=0.0)
+    parser.add_argument("--remote-store-dir", default="")
+    parser.add_argument("--summary-out", default="")
+    args = parser.parse_args(argv)
+
+    remote_store: CheckpointStore | None = (
+        LocalMirrorObjectStore(Path(args.remote_store_dir)) if args.remote_store_dir else None
+    )
+    client = ControlPlaneClient(base_url=args.control_plane_url, org_id=args.org_id)
+    result = run_job_with_failover(
+        client=client,
+        job_id=args.job_id,
+        checkpoint_dir=Path(args.checkpoint_dir),
+        target_steps=args.target_steps,
+        max_preemptions=args.max_preemptions,
+        gpu=args.gpu,
+        worker_prefix=args.worker_prefix,
+        heartbeat_interval_sec=args.heartbeat_interval_sec,
+        step_delay_sec=args.step_delay_sec,
+        remote_store=remote_store,
+    )
+    output_json = json.dumps(asdict(result), indent=2)
+    if args.summary_out:
+        Path(args.summary_out).write_text(output_json, encoding="utf-8")
+    else:
+        sys.stdout.write(output_json + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

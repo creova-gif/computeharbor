@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
+from computeharbor_worker import supervisor
 from computeharbor_worker.client import ControlPlaneClient
 from computeharbor_worker.models import TrainingRunSummary
+from computeharbor_worker.storage import LocalMirrorObjectStore
 from computeharbor_worker.supervisor import FailoverResult, run_job_with_failover
 from computeharbor_worker.trainer import RunResult
 
@@ -103,3 +106,119 @@ def test_supervisor_raises_on_failed_job_without_submitting(tmp_path: Path) -> N
         )
 
     assert client.submitted_jobs == []
+
+
+def test_supervisor_main_writes_summary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_job_with_failover(**kwargs: Any) -> FailoverResult:
+        captured.update(kwargs)
+        return FailoverResult(
+            job_id=str(kwargs["job_id"]),
+            attempts=2,
+            preemptions=1,
+            final_status="COMPLETED",
+            loss_history=[0.5, 0.25],
+            adapter_a_sha256="a" * 64,
+            adapter_b_sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(supervisor, "run_job_with_failover", fake_run_job_with_failover)
+
+    ckpt_dir = tmp_path / "ckpts"
+    remote_dir = tmp_path / "remote"
+    summary_path = tmp_path / "summary.json"
+    exit_code = supervisor.main(
+        [
+            "--control-plane-url",
+            "http://127.0.0.1:8080",
+            "--org-id",
+            "org-cli",
+            "--job-id",
+            "job-cli",
+            "--gpu",
+            "nvidia-a100-80gb",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--target-steps",
+            "50",
+            "--max-preemptions",
+            "4",
+            "--worker-prefix",
+            "spot",
+            "--heartbeat-interval-sec",
+            "0.25",
+            "--step-delay-sec",
+            "0.05",
+            "--remote-store-dir",
+            str(remote_dir),
+            "--summary-out",
+            str(summary_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["client"].base_url == "http://127.0.0.1:8080"
+    assert captured["client"].org_id == "org-cli"
+    assert captured["job_id"] == "job-cli"
+    assert captured["gpu"] == "nvidia-a100-80gb"
+    assert captured["checkpoint_dir"] == ckpt_dir
+    assert captured["target_steps"] == 50
+    assert captured["max_preemptions"] == 4
+    assert captured["worker_prefix"] == "spot"
+    assert captured["heartbeat_interval_sec"] == 0.25
+    assert captured["step_delay_sec"] == 0.05
+    assert isinstance(captured["remote_store"], LocalMirrorObjectStore)
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "job_id": "job-cli",
+        "attempts": 2,
+        "preemptions": 1,
+        "final_status": "COMPLETED",
+        "loss_history": [0.5, 0.25],
+        "adapter_a_sha256": "a" * 64,
+        "adapter_b_sha256": "b" * 64,
+    }
+
+
+def test_supervisor_main_prints_stdout_when_no_summary_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run_job_with_failover(**kwargs: Any) -> FailoverResult:
+        assert kwargs["remote_store"] is None
+        return FailoverResult(
+            job_id=str(kwargs["job_id"]),
+            attempts=1,
+            preemptions=0,
+            final_status="COMPLETED",
+            loss_history=[0.1],
+            adapter_a_sha256="c" * 64,
+            adapter_b_sha256="d" * 64,
+        )
+
+    monkeypatch.setattr(supervisor, "run_job_with_failover", fake_run_job_with_failover)
+
+    exit_code = supervisor.main(
+        [
+            "--control-plane-url",
+            "http://127.0.0.1:8080",
+            "--org-id",
+            "org-stdout",
+            "--job-id",
+            "job-stdout",
+            "--checkpoint-dir",
+            str(tmp_path / "ckpts"),
+        ]
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+    assert payload["job_id"] == "job-stdout"
+    assert payload["final_status"] == "COMPLETED"

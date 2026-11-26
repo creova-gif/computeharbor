@@ -20,6 +20,10 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+computeharbor-worker = "computeharbor_worker.daemon:main"
+computeharbor-supervisor = "computeharbor_worker.supervisor:main"
+
 [tool.setuptools.packages.find]
 where = ["worker/src"]
 

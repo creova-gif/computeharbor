@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-26
+
 ### Added
-- **Ring Barrier HTTP Endpoint (`pkg/server`, `docs/openapi.yaml`):** `POST /v1/jobs/{id}/barrier` for multi-worker `RingBarrier` step synchronization (`world_size`, `rank`, `step`).
+- **Ring Barrier HTTP Endpoint (`pkg/server`, `docs/openapi.yaml`, `worker/`):** `POST /v1/jobs/{id}/barrier` and `ControlPlaneClient.barrier` for multi-worker `RingBarrier` step synchronization (`world_size`, `rank`, `step`).
 - **Web Console Bearer Auth Input (`pkg/server/ui.go`):** Optional Bearer API-key input in the `GET /ui` console for authenticated control-plane deployments.
 - **Periodic Coordinator Snapshots (`control-plane/`):** `-snapshot-interval` flag on `computeharbor serve` (default `5s`) for background coordinator state persistence when `-state-file` is configured.
-- **Go Control-Plane Benchmarks (`Makefile`, `pkg/cost`, `pkg/orchestrator`):** `make bench` microbenchmark suite covering cost calculation, fleet ranking, job submission/heartbeats, and stale-lease reaping.
+- **Go Control-Plane Benchmarks (`Makefile`, `pkg/cost`, `pkg/orchestrator`):** `make bench` microbenchmark suite covering cost calculation, fleet ranking, job submission/heartbeats, and zero-alloc healthy-fleet stale-lease reaping.
 
 ## [0.2.0] - 2026-11-26
 

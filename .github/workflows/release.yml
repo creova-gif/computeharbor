@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Build release binaries
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "dist/computeharbor-${GOOS}-${GOARCH}" \
+              ./control-plane/cmd/computeharbor
+          done
+          (cd dist && sha256sum computeharbor-* > SHA256SUMS)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/computeharbor-linux-amd64
+            dist/computeharbor-linux-arm64
+            dist/computeharbor-darwin-arm64
+            dist/SHA256SUMS

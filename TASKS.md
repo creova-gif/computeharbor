@@ -13,4 +13,4 @@
 
 ## Wave 3: Launch & Design Partner Validation
 - [x] Publish clean README with reproducible benchmark numbers
-- [ ] Run first external design-partner or open-source release
+- [x] Run first external design-partner or open-source release

@@ -174,11 +174,14 @@ class CheckpointManager:
         _atomic_write_bytes(latest_manifest_path, manifest_bytes)
         if self.remote_store is not None:
             self.remote_store.put_file(step_manifest_path, f"{job_id}/{step_manifest_path.name}")
+            self.remote_store.put_file(latest_manifest_path, "latest.json")
         self.prune_old_checkpoints()
         return manifest
 
     def has_latest(self) -> bool:
-        return (self.checkpoint_dir / "latest.json").is_file()
+        if (self.checkpoint_dir / "latest.json").is_file():
+            return True
+        return self.remote_store is not None and self.remote_store.exists("latest.json")
 
     def load_latest(
         self,
@@ -186,12 +189,19 @@ class CheckpointManager:
         self.reconcile_stale_temporaries()
         latest_path = self.checkpoint_dir / "latest.json"
         if not latest_path.is_file():
-            raise FileNotFoundError(f"No checkpoint manifest found at {latest_path}")
+            if self.remote_store is None or not self.remote_store.exists("latest.json"):
+                raise FileNotFoundError(f"No checkpoint manifest found at {latest_path}")
+            self.remote_store.get_file("latest.json", latest_path)
 
         manifest = CheckpointManifest.model_validate_json(latest_path.read_text(encoding="utf-8"))
         st_path = self.checkpoint_dir / manifest.safetensors_filename
         if not st_path.is_file():
-            raise FileNotFoundError(f"Missing Safetensors file {st_path}")
+            if self.remote_store is None:
+                raise FileNotFoundError(f"Missing Safetensors file {st_path}")
+            self.remote_store.get_file(
+                f"{manifest.job_id}/{manifest.safetensors_filename}",
+                st_path,
+            )
 
         actual_sha256 = hashlib.sha256(st_path.read_bytes()).hexdigest()
         if actual_sha256 != manifest.payload_sha256:

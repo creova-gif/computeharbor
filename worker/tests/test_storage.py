@@ -22,7 +22,7 @@ from computeharbor_worker.storage import (
     cuda_synchronize_if_available,
     store_from_uri,
 )
-from computeharbor_worker.trainer import main
+from computeharbor_worker.trainer import LoRATrainer, main
 
 
 def test_local_mirror_object_store_put_get_exists(tmp_path: Path) -> None:
@@ -295,3 +295,47 @@ def test_store_from_uri_routing(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported store URI scheme"):
         store_from_uri("ftp://example.com/ckpt")
+
+
+def test_fresh_node_restores_from_remote_store_on_empty_local_dir(tmp_path: Path) -> None:
+    cfg = LoRAConfig(in_features=32, out_features=16, rank=4, base_seed=777)
+
+    baseline_trainer = LoRATrainer(
+        job_id="job-remote-restore-baseline",
+        config=cfg,
+        checkpoint_dir=tmp_path / "baseline_ckpt",
+    )
+    baseline = baseline_trainer.train(target_steps=15)
+    assert len(baseline.summary.loss_history) == 15
+
+    mirror_dir = tmp_path / "mirror"
+    remote_store = LocalMirrorObjectStore(mirror_dir)
+
+    node1_ckpt = tmp_path / "node1_ckpt"
+    node1 = LoRATrainer(
+        job_id="job-remote-restore",
+        config=cfg,
+        checkpoint_dir=node1_ckpt,
+        remote_store=remote_store,
+    )
+    node1_res = node1.train(target_steps=8)
+    assert node1_res.summary.completed_step == 8
+    assert remote_store.exists("latest.json")
+
+    node2_ckpt = tmp_path / "node2_ckpt"
+    node2 = LoRATrainer(
+        job_id="job-remote-restore",
+        config=cfg,
+        checkpoint_dir=node2_ckpt,
+        remote_store=remote_store,
+    )
+    assert node2.restore_if_available() is True
+    assert node2.step == 8
+
+    node2_res = node2.train(target_steps=15)
+    assert node2_res.summary.completed_step == 15
+    assert node2_res.summary.loss_history == baseline.summary.loss_history
+    assert node2_res.summary.adapter_a_sha256 == baseline.summary.adapter_a_sha256
+    assert node2_res.summary.adapter_b_sha256 == baseline.summary.adapter_b_sha256
+    np.testing.assert_array_equal(node2_res.lora_a, baseline.lora_a)
+    np.testing.assert_array_equal(node2_res.lora_b, baseline.lora_b)

@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: computeharbor-lora-worker
+  labels:
+    app.kubernetes.io/name: computeharbor-lora-worker
+    app.kubernetes.io/component: worker
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: computeharbor-lora-worker
+        app.kubernetes.io/component: worker
+    spec:
+      restartPolicy: OnFailure
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: computeharbor-worker
+          image: ghcr.io/computeharbor/worker:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          args:
+            - --control-plane-url
+            - http://computeharbor-control-plane:8080
+            - --org-id
+            - org-default
+            - --job-id
+            - computeharbor-lora-worker
+            - --worker-node-id
+            - $(POD_NAME)
+            - --checkpoint-dir
+            - /var/lib/computeharbor/checkpoints
+            - --target-steps
+            - "100"
+            - --heartbeat-interval-sec
+            - "5"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /var/lib/computeharbor/checkpoints
+      volumes:
+        - name: checkpoints
+          emptyDir: {}

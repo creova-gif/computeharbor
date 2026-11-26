@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
 ### Added
+- **Security Policy (`SECURITY.md`):** Supported versions (`0.2.x`, `0.1.x`), private vulnerability reporting instructions, and summary of authentication, tenant isolation, webhook signing, checkpoint integrity, and CI secret-scanning controls.
+- **HTTP Security Hardening (`pkg/server`, `control-plane/`):** Slowloris HTTP server timeouts (`ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout`), bounded `OrgRateLimiter` stale-bucket eviction, and constant-time Bearer API-key authentication (`-api-key` / `COMPUTEHARBOR_API_KEY`).
+- **Webhook Retry Backoff & Delivery Counters (`pkg/events`):** Bounded exponential retry backoff (`WithRetry`) plus `DeliveredCount`, `FailedCount`, and `DroppedCount` counters on `WebhookDispatcher`.
+- **Bounded Checkpoint Retention (`worker/`):** `CheckpointManager` `max_checkpoints` pruning (`--max-checkpoints` on `computeharbor-worker`, default `5`, `0` for unlimited) to bound local disk usage.
 - **Prometheus Observability & Grafana Dashboard (`pkg/server`, `deploy/`):** `GET /metrics` endpoint emitting Prometheus `0.0.4` text metrics (`ADR-003`) and pre-built `deploy/grafana-dashboard.json`.
 - **Coordinator Snapshot Persistence (`pkg/orchestrator`, `control-plane/`):** `CoordinatorSnapshot` atomic JSON persistence and `-state-file` flag on `computeharbor serve` for crash/restart recovery.
 - **Presigned Object Store (`worker/`):** `HTTPPresignedStore` and `store_from_uri` factory supporting `http://`, `https://`, `file://`, `gs://`, and `s3://` checkpoint replication targets.

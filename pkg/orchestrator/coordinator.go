@@ -57,10 +57,18 @@ type JobLease struct {
 	LastRecoveryDurMs int64
 }
 
+type CoordinatorStats struct {
+	JobsByStatus     map[JobStatus]int
+	TotalPreemptions int
+	TotalCheckpoints int
+	MaxRecoveryDurMs int64
+}
+
 type Coordinator struct {
-	mu   sync.RWMutex
-	jobs map[string]*JobLease
-	now  func() time.Time
+	mu               sync.RWMutex
+	jobs             map[string]*JobLease
+	now              func() time.Time
+	totalCheckpoints int
 }
 
 func NewCoordinator() *Coordinator {
@@ -227,6 +235,7 @@ func (c *Coordinator) CommitCheckpoint(jobID string, ref CheckpointRef) (JobLeas
 	job.LatestCheckpoint = &cp
 	job.CurrentStep = ref.Step
 	job.UpdatedAt = c.now()
+	c.totalCheckpoints++
 
 	if ref.Step >= job.TargetSteps {
 		job.Status = StatusCompleted
@@ -263,6 +272,35 @@ func (c *Coordinator) ListJobs(orgID string) []JobLease {
 		return out[i].JobID < out[j].JobID
 	})
 	return out
+}
+
+// Stats returns an aggregate snapshot of coordinator job counts, preemptions,
+// checkpoints, and maximum recovery duration.
+func (c *Coordinator) Stats() CoordinatorStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	stats := CoordinatorStats{
+		JobsByStatus: map[JobStatus]int{
+			StatusQueued:        0,
+			StatusRunning:       0,
+			StatusCheckpointing: 0,
+			StatusMigrating:     0,
+			StatusCompleted:     0,
+			StatusFailed:        0,
+		},
+		TotalCheckpoints: c.totalCheckpoints,
+	}
+
+	for _, job := range c.jobs {
+		stats.JobsByStatus[job.Status]++
+		stats.TotalPreemptions += job.PreemptionCount
+		if job.LastRecoveryDurMs > stats.MaxRecoveryDurMs {
+			stats.MaxRecoveryDurMs = job.LastRecoveryDurMs
+		}
+	}
+
+	return stats
 }
 
 func cloneLease(src *JobLease) JobLease {

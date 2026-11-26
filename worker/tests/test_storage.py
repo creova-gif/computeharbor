@@ -320,7 +320,7 @@ def test_fresh_node_restores_from_remote_store_on_empty_local_dir(tmp_path: Path
     )
     node1_res = node1.train(target_steps=8)
     assert node1_res.summary.completed_step == 8
-    assert remote_store.exists("latest.json")
+    assert remote_store.exists("job-remote-restore/latest.json")
 
     node2_ckpt = tmp_path / "node2_ckpt"
     node2 = LoRATrainer(
@@ -339,3 +339,54 @@ def test_fresh_node_restores_from_remote_store_on_empty_local_dir(tmp_path: Path
     assert node2_res.summary.adapter_b_sha256 == baseline.summary.adapter_b_sha256
     np.testing.assert_array_equal(node2_res.lora_a, baseline.lora_a)
     np.testing.assert_array_equal(node2_res.lora_b, baseline.lora_b)
+
+
+def test_remote_store_isolates_concurrent_jobs(tmp_path: Path) -> None:
+    cfg_alpha = LoRAConfig(in_features=16, out_features=8, rank=2, base_seed=101)
+    cfg_beta = LoRAConfig(in_features=16, out_features=8, rank=2, base_seed=202)
+    mirror_dir = tmp_path / "mirror"
+    remote_store = LocalMirrorObjectStore(mirror_dir)
+
+    alpha_node1 = LoRATrainer(
+        job_id="job-alpha",
+        config=cfg_alpha,
+        checkpoint_dir=tmp_path / "alpha_node1",
+        remote_store=remote_store,
+    )
+    alpha_res = alpha_node1.train(target_steps=6)
+    assert alpha_res.summary.completed_step == 6
+
+    beta_node1 = LoRATrainer(
+        job_id="job-beta",
+        config=cfg_beta,
+        checkpoint_dir=tmp_path / "beta_node1",
+        remote_store=remote_store,
+    )
+    beta_res = beta_node1.train(target_steps=10)
+    assert beta_res.summary.completed_step == 10
+
+    assert remote_store.exists("job-alpha/latest.json")
+    assert remote_store.exists("job-beta/latest.json")
+    assert not remote_store.exists("latest.json")
+
+    alpha_node2 = LoRATrainer(
+        job_id="job-alpha",
+        config=cfg_alpha,
+        checkpoint_dir=tmp_path / "alpha_node2_empty",
+        remote_store=remote_store,
+    )
+    assert alpha_node2.restore_if_available() is True
+    assert alpha_node2.step == 6
+    np.testing.assert_array_equal(alpha_node2.lora_a, alpha_res.lora_a)
+    np.testing.assert_array_equal(alpha_node2.lora_b, alpha_res.lora_b)
+
+    beta_node2 = LoRATrainer(
+        job_id="job-beta",
+        config=cfg_beta,
+        checkpoint_dir=tmp_path / "beta_node2_empty",
+        remote_store=remote_store,
+    )
+    assert beta_node2.restore_if_available() is True
+    assert beta_node2.step == 10
+    np.testing.assert_array_equal(beta_node2.lora_a, beta_res.lora_a)
+    np.testing.assert_array_equal(beta_node2.lora_b, beta_res.lora_b)

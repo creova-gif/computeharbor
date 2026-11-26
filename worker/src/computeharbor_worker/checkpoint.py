@@ -79,6 +79,7 @@ class CheckpointManager:
         checkpoint_dir: Path | str,
         remote_store: CheckpointStore | None = None,
         max_checkpoints: int = 5,
+        job_id: str | None = None,
     ) -> None:
         if max_checkpoints < 0:
             raise ValueError(
@@ -88,7 +89,14 @@ class CheckpointManager:
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.remote_store = remote_store
         self.max_checkpoints = max_checkpoints
+        self.job_id = job_id
         self.reconcile_stale_temporaries()
+
+    def _remote_latest_key(self, job_id: str | None = None) -> str:
+        effective_id = job_id or self.job_id
+        if effective_id:
+            return f"{effective_id}/latest.json"
+        return "latest.json"
 
     def reconcile_stale_temporaries(self) -> int:
         removed = 0
@@ -170,18 +178,21 @@ class CheckpointManager:
         step_manifest_path = self.checkpoint_dir / f"step-{step:06d}.manifest.json"
         latest_manifest_path = self.checkpoint_dir / "latest.json"
 
+        self.job_id = self.job_id or job_id
         _atomic_write_bytes(step_manifest_path, manifest_bytes)
         _atomic_write_bytes(latest_manifest_path, manifest_bytes)
         if self.remote_store is not None:
             self.remote_store.put_file(step_manifest_path, f"{job_id}/{step_manifest_path.name}")
-            self.remote_store.put_file(latest_manifest_path, "latest.json")
+            self.remote_store.put_file(latest_manifest_path, self._remote_latest_key(job_id))
         self.prune_old_checkpoints()
         return manifest
 
     def has_latest(self) -> bool:
         if (self.checkpoint_dir / "latest.json").is_file():
             return True
-        return self.remote_store is not None and self.remote_store.exists("latest.json")
+        if self.remote_store is None:
+            return False
+        return self.remote_store.exists(self._remote_latest_key())
 
     def load_latest(
         self,
@@ -189,9 +200,10 @@ class CheckpointManager:
         self.reconcile_stale_temporaries()
         latest_path = self.checkpoint_dir / "latest.json"
         if not latest_path.is_file():
-            if self.remote_store is None or not self.remote_store.exists("latest.json"):
+            remote_key = self._remote_latest_key()
+            if self.remote_store is None or not self.remote_store.exists(remote_key):
                 raise FileNotFoundError(f"No checkpoint manifest found at {latest_path}")
-            self.remote_store.get_file("latest.json", latest_path)
+            self.remote_store.get_file(remote_key, latest_path)
 
         manifest = CheckpointManifest.model_validate_json(latest_path.read_text(encoding="utf-8"))
         st_path = self.checkpoint_dir / manifest.safetensors_filename

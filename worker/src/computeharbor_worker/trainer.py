@@ -75,6 +75,7 @@ class LoRATrainer:
             checkpoint_dir,
             remote_store=remote_store,
             max_checkpoints=max_checkpoints,
+            job_id=job_id,
         )
 
         base_rng = np.random.default_rng(config.base_seed)

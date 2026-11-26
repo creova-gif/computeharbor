@@ -29,6 +29,35 @@ const uiHTML = `<!DOCTYPE html>
     --red: #ef4444;
   }
   * { box-sizing: border-box; }
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    background: var(--accent);
+    color: #082f49;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+    z-index: 100;
+  }
+  .skip-link:focus {
+    position: fixed;
+    left: 16px;
+    top: 16px;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   body {
     margin: 0;
     padding: 24px;
@@ -56,6 +85,11 @@ const uiHTML = `<!DOCTYPE html>
     align-items: center;
     gap: 10px;
   }
+  .field {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
   label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
   input[type="text"],
   input[type="password"] {
@@ -67,8 +101,13 @@ const uiHTML = `<!DOCTYPE html>
     font-size: 0.875rem;
     min-width: 160px;
   }
-  input[type="text"]:focus,
-  input[type="password"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid #38bdf8;
+    outline-offset: 2px;
+  }
   button {
     background: var(--accent);
     color: #082f49;
@@ -167,78 +206,150 @@ const uiHTML = `<!DOCTYPE html>
     font-weight: 500;
   }
   .auth-banner.visible { display: block; }
+  .footer {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.8rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  @media (max-width: 640px) {
+    body { padding: 16px; }
+    header { flex-direction: column; align-items: stretch; }
+    .controls { flex-direction: column; align-items: stretch; }
+    .field { flex-direction: column; align-items: stretch; }
+    input[type="text"],
+    input[type="password"],
+    button { width: 100%; min-width: 0; }
+    .panel-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .kpi-grid { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <div class="container">
   <header>
     <div>
       <h1>ComputeHarbor Status &amp; Spot Savings Console</h1>
       <div class="subtitle">Control plane health, regional spot fleet rankings, jobs, and org savings</div>
     </div>
-    <div class="controls">
-      <span id="health-badge" class="badge">Checking...</span>
-      <label for="org-id">X-Org-ID</label>
-      <input id="org-id" type="text" value="org-demo" autocomplete="off">
-      <label for="apiKeyInput">API Key</label>
-      <input id="apiKeyInput" type="password" placeholder="Optional Bearer API key" autocomplete="off">
+    <div class="controls" role="search" aria-label="Console filters and authentication">
+      <span id="health-badge" class="badge" role="status" aria-live="polite">Checking...</span>
+      <div class="field">
+        <label for="orgInput">X-Org-ID</label>
+        <input id="orgInput" type="text" value="org-demo" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="apiKeyInput">API Key</label>
+        <input id="apiKeyInput" type="password" placeholder="Optional Bearer API key" autocomplete="off">
+      </div>
       <button id="refresh-btn" type="button">Refresh</button>
     </div>
   </header>
 
-  <div id="auth-error-banner" class="auth-banner" role="alert">API key required or invalid</div>
+  <main id="main-content" tabindex="-1">
+    <div id="auth-error-banner" class="auth-banner" role="alert" aria-live="polite">API key required or invalid</div>
 
-  <section class="kpi-grid">
-    <div class="card">
-      <div class="kpi-label">Net Spot Savings</div>
-      <div id="kpi-savings" class="kpi-value">--</div>
-      <div id="kpi-savings-sub" class="kpi-sub">Waiting for billing summary</div>
-    </div>
-    <div class="card">
-      <div class="kpi-label">Est. Spot vs On-Demand</div>
-      <div id="kpi-spend" class="kpi-value">--</div>
-      <div id="kpi-spend-sub" class="kpi-sub">--</div>
-    </div>
-    <div class="card">
-      <div class="kpi-label">Organization Jobs</div>
-      <div id="kpi-jobs" class="kpi-value">--</div>
-      <div id="kpi-jobs-sub" class="kpi-sub">--</div>
-    </div>
-    <div class="card">
-      <div class="kpi-label">Top Spot Pool (24GB+ VRAM)</div>
-      <div id="kpi-top-pool" class="kpi-value">--</div>
-      <div id="kpi-top-pool-sub" class="kpi-sub">--</div>
-    </div>
-  </section>
+    <section class="kpi-grid" aria-label="Key performance indicators" aria-live="polite">
+      <div class="card">
+        <div class="kpi-label">Net Spot Savings</div>
+        <div id="kpi-savings" class="kpi-value">--</div>
+        <div id="kpi-savings-sub" class="kpi-sub">Waiting for billing summary</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Est. Spot vs On-Demand</div>
+        <div id="kpi-spend" class="kpi-value">--</div>
+        <div id="kpi-spend-sub" class="kpi-sub">--</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Organization Jobs</div>
+        <div id="kpi-jobs" class="kpi-value">--</div>
+        <div id="kpi-jobs-sub" class="kpi-sub">--</div>
+      </div>
+      <div class="card">
+        <div class="kpi-label">Top Spot Pool (24GB+ VRAM)</div>
+        <div id="kpi-top-pool" class="kpi-value">--</div>
+        <div id="kpi-top-pool-sub" class="kpi-sub">--</div>
+      </div>
+    </section>
 
-  <section class="panel">
-    <div class="panel-header">
-      <h2 class="panel-title">Spot Fleet Rankings (min_vram=24)</h2>
-      <span id="fleet-meta" class="panel-meta">/v1/fleet/rank?min_vram=24</span>
-    </div>
-    <div id="fleet-body" class="table-wrap"><div class="empty">Loading fleet rankings...</div></div>
-  </section>
+    <section class="panel" aria-labelledby="fleet-heading">
+      <div class="panel-header">
+        <h2 id="fleet-heading" class="panel-title">Spot Fleet Rankings (min_vram=24)</h2>
+        <span id="fleet-meta" class="panel-meta">/v1/fleet/rank?min_vram=24</span>
+      </div>
+      <div id="fleet-body" class="table-wrap" aria-live="polite">
+        <table aria-label="Spot Fleet Rankings">
+          <thead>
+            <tr>
+              <th scope="col">GPU</th>
+              <th scope="col">Provider</th>
+              <th scope="col">Region</th>
+              <th scope="col" class="num">VRAM</th>
+              <th scope="col" class="num">Spot/hr</th>
+              <th scope="col" class="num">On-Demand/hr</th>
+              <th scope="col" class="num">Effective/hr</th>
+              <th scope="col" class="num">Net Savings</th>
+              <th scope="col" class="num">Availability</th>
+              <th scope="col" class="num">Score</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="10" class="empty">Loading fleet rankings...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
-  <section class="panel">
-    <div class="panel-header">
-      <h2 class="panel-title">Organization Jobs</h2>
-      <span id="jobs-meta" class="panel-meta">/v1/jobs</span>
-    </div>
-    <div id="jobs-body" class="table-wrap"><div class="empty">Loading jobs...</div></div>
-  </section>
+    <section class="panel" aria-labelledby="jobs-heading">
+      <div class="panel-header">
+        <h2 id="jobs-heading" class="panel-title">Organization Jobs</h2>
+        <span id="jobs-meta" class="panel-meta">/v1/jobs</span>
+      </div>
+      <div id="jobs-body" class="table-wrap" aria-live="polite">
+        <table aria-label="Organization Jobs">
+          <thead>
+            <tr>
+              <th scope="col">Job ID</th>
+              <th scope="col">GPU</th>
+              <th scope="col">Status</th>
+              <th scope="col">Worker</th>
+              <th scope="col" class="num">Progress</th>
+              <th scope="col" class="num">Preemptions</th>
+              <th scope="col" class="num">Last Recovery</th>
+              <th scope="col">Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="8" class="empty">Loading jobs...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
-  <section class="panel">
-    <div class="panel-header">
-      <h2 class="panel-title">Control Plane Metrics</h2>
-      <span id="metrics-meta" class="panel-meta">/metrics</span>
-    </div>
-    <pre id="metrics-body" class="metrics">Loading metrics...</pre>
-  </section>
+    <section class="panel" aria-labelledby="metrics-heading">
+      <div class="panel-header">
+        <h2 id="metrics-heading" class="panel-title">Control Plane Metrics</h2>
+        <span id="metrics-meta" class="panel-meta">/metrics</span>
+      </div>
+      <pre id="metrics-body" class="metrics" aria-live="polite">Loading metrics...</pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>ComputeHarbor Control Plane Console</span>
+    <span>Keyboard: Tab to navigate controls · Enter to refresh</span>
+  </footer>
 </div>
 
 <script>
 (function () {
-  var orgInput = document.getElementById("org-id");
+  var orgInput = document.getElementById("orgInput");
   var apiKeyInput = document.getElementById("apiKeyInput");
   var authBanner = document.getElementById("auth-error-banner");
   var refreshBtn = document.getElementById("refresh-btn");
@@ -315,6 +426,7 @@ const uiHTML = `<!DOCTYPE html>
     var hr = document.createElement("tr");
     headers.forEach(function (h, i) {
       var th = document.createElement("th");
+      th.setAttribute("scope", "col");
       th.textContent = h;
       if (numericCols[i]) th.className = "num";
       hr.appendChild(th);

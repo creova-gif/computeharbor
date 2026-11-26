@@ -147,3 +147,105 @@ def test_auth_and_billing_e2e(
         except subprocess.TimeoutExpired:
             server_proc.kill()
             server_proc.wait(timeout=5.0)
+
+
+def test_scoped_org_api_keys_e2e(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    binary_path = tmp_path / "computeharbor"
+
+    subprocess.run(
+        ["go", "build", "-o", str(binary_path), "./control-plane/cmd/computeharbor"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    port = _find_free_port()
+    base_url = f"http://127.0.0.1:{port}"
+
+    server_proc = subprocess.Popen(
+        [
+            str(binary_path),
+            "serve",
+            "-addr",
+            f"127.0.0.1:{port}",
+            "-org-api-keys",
+            "org-alpha=tok-alpha-e2e,org-beta=tok-beta-e2e",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        alpha_client = ControlPlaneClient(
+            base_url,
+            org_id="org-alpha",
+            api_key="tok-alpha-e2e",
+        )
+        health = _wait_for_healthz(alpha_client, server_proc)
+        assert health.get("status") == "ok"
+
+        ready = alpha_client.readyz()
+        assert ready == {"status": "ready"}
+        assert alpha_client.last_request_id is not None
+        assert len(alpha_client.last_request_id) > 0
+
+        job_id = "e2e-scoped-alpha-job-1"
+        submitted = alpha_client.submit_job(
+            job_id=job_id,
+            gpu="nvidia-h100-80gb",
+            target_steps=10,
+            max_preemptions=1,
+        )
+        assert submitted["status"] == "QUEUED"
+        assert alpha_client.last_request_id is not None
+
+        job_state = alpha_client.get_job(job_id)
+        assert job_state["job_id"] == job_id
+        assert job_state["org_id"] == "org-alpha"
+        assert job_state["status"] == "QUEUED"
+
+        billing_req = urllib.request.Request(
+            f"{base_url}/v1/billing/summary",
+            headers={
+                "Accept": "application/json",
+                "Authorization": "Bearer tok-alpha-e2e",
+                "X-Org-ID": "org-alpha",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(billing_req, timeout=5.0) as billing_resp:
+            assert billing_resp.status == 200
+            assert billing_resp.headers.get("X-Request-ID")
+            billing_data = json.loads(billing_resp.read().decode("utf-8"))
+        assert billing_data["total_jobs"] == 1
+
+        impersonating_client = ControlPlaneClient(
+            base_url,
+            org_id="org-beta",
+            api_key="tok-alpha-e2e",
+        )
+        with pytest.raises(ControlPlaneError) as forbidden_exc:
+            impersonating_client.get_job(job_id)
+        assert forbidden_exc.value.status_code == 403
+        assert impersonating_client.last_request_id is not None
+
+        unauth_client = ControlPlaneClient(base_url, org_id="org-alpha", api_key="")
+        with pytest.raises(ControlPlaneError) as unauth_exc:
+            unauth_client.submit_job(
+                job_id="e2e-unauth-scoped-job",
+                gpu="nvidia-l4-24gb",
+                target_steps=5,
+                max_preemptions=1,
+            )
+        assert unauth_exc.value.status_code == 401
+    finally:
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
+            server_proc.wait(timeout=5.0)

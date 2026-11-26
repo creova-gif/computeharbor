@@ -89,6 +89,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.logger != nil {
 		handler = LoggingMiddleware(s.logger, handler)
 	}
+	handler = SecurityHeadersMiddleware(handler)
 	handler.ServeHTTP(w, r)
 }
 
@@ -375,6 +376,9 @@ func (s *Server) handleCommitCheckpoint(w http.ResponseWriter, r *http.Request) 
 		writeDomainError(w, err)
 		return
 	}
+	if lease.Status == orchestrator.StatusCompleted || lease.Status == orchestrator.StatusFailed {
+		s.deleteBarrier(id)
+	}
 	writeJSON(w, http.StatusOK, toJobLeaseResponse(lease))
 }
 
@@ -389,6 +393,7 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
+	s.deleteBarrier(id)
 	writeJSON(w, http.StatusOK, toJobLeaseResponse(lease))
 }
 

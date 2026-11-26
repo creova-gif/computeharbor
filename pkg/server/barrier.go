@@ -78,3 +78,9 @@ func (s *Server) getOrCreateBarrier(jobID string, worldSize int) (*orchestrator.
 	s.barriers[jobID] = created
 	return created, nil
 }
+
+func (s *Server) deleteBarrier(jobID string) {
+	s.barrierMu.Lock()
+	defer s.barrierMu.Unlock()
+	delete(s.barriers, jobID)
+}

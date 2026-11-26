@@ -23,4 +23,5 @@ __pycache__/
 # Secrets & OS files
 .env
 .env.*
+!.env.example
 .DS_Store

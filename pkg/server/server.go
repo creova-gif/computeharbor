@@ -335,6 +335,15 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toJobLeaseResponse(lease))
 }
 
+var validListJobStatuses = map[orchestrator.JobStatus]bool{
+	orchestrator.StatusQueued:    true,
+	orchestrator.StatusRunning:   true,
+	orchestrator.StatusMigrating: true,
+	orchestrator.StatusCompleted: true,
+	orchestrator.StatusFailed:    true,
+	orchestrator.StatusCancelled: true,
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	orgID := strings.TrimSpace(r.Header.Get("X-Org-ID"))
 	if orgID == "" {
@@ -342,9 +351,60 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	q := r.URL.Query()
+	statusFilter := strings.TrimSpace(q.Get("status"))
+	if statusFilter != "" && !validListJobStatuses[orchestrator.JobStatus(statusFilter)] {
+		writeError(w, http.StatusBadRequest, "invalid status filter")
+		return
+	}
+
+	limit := 0
+	if rawLimit := strings.TrimSpace(q.Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a non-negative integer")
+			return
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if rawOffset := strings.TrimSpace(q.Get("offset")); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = parsed
+	}
+
 	leases := s.coord.ListJobs(orgID)
-	resp := make([]jobLeaseResponse, 0, len(leases))
-	for _, lease := range leases {
+	filtered := leases
+	if statusFilter != "" {
+		targetStatus := orchestrator.JobStatus(statusFilter)
+		filtered = make([]orchestrator.JobLease, 0, len(leases))
+		for _, lease := range leases {
+			if lease.Status == targetStatus {
+				filtered = append(filtered, lease)
+			}
+		}
+	}
+
+	w.Header().Set("X-Total-Count", strconv.Itoa(len(filtered)))
+
+	paged := filtered
+	if offset >= len(paged) {
+		paged = nil
+	} else {
+		end := len(paged)
+		if limit > 0 {
+			end = min(offset+limit, len(paged))
+		}
+		paged = paged[offset:end]
+	}
+
+	resp := make([]jobLeaseResponse, 0, len(paged))
+	for _, lease := range paged {
 		resp = append(resp, toJobLeaseResponse(lease))
 	}
 	writeJSON(w, http.StatusOK, resp)

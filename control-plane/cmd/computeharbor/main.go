@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -71,12 +72,24 @@ func run(args []string, out io.Writer) error {
 	return enc.Encode(res)
 }
 
+type serveConfig struct {
+	reapInterval   time.Duration
+	leaseTTL       time.Duration
+	stateFile      string
+	rateLimitRPS   float64
+	rateLimitBurst int
+	logJSON        bool
+}
+
 func runServe(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("computeharbor serve", flag.ContinueOnError)
 	addr := fs.String("addr", ":8080", "HTTP listen address")
 	reapInterval := fs.Duration("reap-interval", 5*time.Second, "Background stale-lease reaper interval")
 	leaseTTL := fs.Duration("lease-ttl", 30*time.Second, "Worker heartbeat lease TTL before preemption")
 	stateFile := fs.String("state-file", "", "Optional path to persist coordinator JSON snapshot")
+	rateLimitRPS := fs.Float64("rate-limit-rps", 0, "Per-org HTTP rate limit in requests per second (<= 0 disables)")
+	rateLimitBurst := fs.Int("rate-limit-burst", 20, "Per-org HTTP rate limit burst size")
+	logJSON := fs.Bool("log-json", true, "Emit structured JSON HTTP request logs to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,23 +98,44 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return serveListener(ctx, ln, out, *reapInterval, *leaseTTL, *stateFile)
+	return serveListenerWithConfig(ctx, ln, out, serveConfig{
+		reapInterval:   *reapInterval,
+		leaseTTL:       *leaseTTL,
+		stateFile:      *stateFile,
+		rateLimitRPS:   *rateLimitRPS,
+		rateLimitBurst: *rateLimitBurst,
+		logJSON:        *logJSON,
+	})
 }
 
 func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInterval, leaseTTL time.Duration, stateFile string) error {
+	return serveListenerWithConfig(ctx, ln, out, serveConfig{
+		reapInterval: reapInterval,
+		leaseTTL:     leaseTTL,
+		stateFile:    stateFile,
+	})
+}
+
+func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer, cfg serveConfig) error {
 	coord := orchestrator.NewCoordinator()
-	if stateFile != "" {
+	if cfg.stateFile != "" {
 		var err error
-		coord, err = orchestrator.LoadCoordinatorFromFile(stateFile)
+		coord, err = orchestrator.LoadCoordinatorFromFile(cfg.stateFile)
 		if err != nil {
 			return fmt.Errorf("load coordinator state: %w", err)
 		}
 	}
 
 	api := server.New(coord)
+	if cfg.logJSON {
+		api.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	}
+	if cfg.rateLimitRPS > 0 {
+		api.WithRateLimit(cfg.rateLimitRPS, cfg.rateLimitBurst)
+	}
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	defer cancelReaper()
-	reaperDone := api.StartReaper(reaperCtx, reapInterval, leaseTTL)
+	reaperDone := api.StartReaper(reaperCtx, cfg.reapInterval, cfg.leaseTTL)
 
 	srv := &http.Server{
 		Handler:           api,
@@ -138,8 +172,8 @@ func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInte
 		}
 	}
 
-	if stateFile != "" {
-		if err := coord.SaveSnapshot(stateFile); err != nil {
+	if cfg.stateFile != "" {
+		if err := coord.SaveSnapshot(cfg.stateFile); err != nil {
 			return fmt.Errorf("save coordinator state: %w", err)
 		}
 	}

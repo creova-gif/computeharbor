@@ -3,6 +3,10 @@ from __future__ import annotations
 import importlib
 import random
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,8 +17,10 @@ from computeharbor_worker.checkpoint import CheckpointManager
 from computeharbor_worker.models import CheckpointManifest, LoRAConfig
 from computeharbor_worker.storage import (
     CheckpointStore,
+    HTTPPresignedStore,
     LocalMirrorObjectStore,
     cuda_synchronize_if_available,
+    store_from_uri,
 )
 from computeharbor_worker.trainer import main
 
@@ -154,3 +160,138 @@ def test_cuda_synchronize_if_available_cpu_and_mocked_cuda(
     monkeypatch.setitem(sys.modules, "torch", fake_torch_cuda)
     assert cuda_synchronize_if_available() is True
     assert sync_calls == 1
+
+
+@contextmanager
+def _in_memory_object_http_server() -> Iterator[str]:
+    objects: dict[str, bytes] = {}
+    lock = threading.Lock()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_PUT(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            with lock:
+                objects[self.path] = body
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            with lock:
+                payload = objects.get(self.path)
+            if payload is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_HEAD(self) -> None:
+            with lock:
+                found = self.path in objects
+            self.send_response(200 if found else 404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address[:2]
+        yield f"http://127.0.0.1:{port}/presigned"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_http_presigned_store_put_get_exists(tmp_path: Path) -> None:
+    with _in_memory_object_http_server() as base_url:
+        store = HTTPPresignedStore(base_url)
+        assert isinstance(store, CheckpointStore)
+
+        src = tmp_path / "weights.safetensors"
+        payload = b"presigned-checkpoint-payload-v1"
+        src.write_bytes(payload)
+
+        key = "job-http-1/step-000010.safetensors"
+        assert not store.exists(key)
+
+        uri = store.put_file(src, key)
+        assert uri == f"{base_url}/{key}"
+        assert store.exists(key)
+
+        dest = tmp_path / "downloaded" / "weights.safetensors"
+        store.get_file(key, dest)
+        assert dest.read_bytes() == payload
+        assert list(dest.parent.glob("*.tmp")) == []
+
+
+def test_http_presigned_store_validation_and_errors(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Invalid HTTP store base_url"):
+        HTTPPresignedStore("ftp://example.com/bucket")
+
+    with _in_memory_object_http_server() as base_url:
+        store = HTTPPresignedStore(base_url)
+        src = tmp_path / "data.bin"
+        src.write_bytes(b"abc")
+
+        with pytest.raises(ValueError, match="Invalid object key"):
+            store.put_file(src, "../escape.bin")
+
+        with pytest.raises(ValueError, match="empty"):
+            store.exists("/")
+
+        with pytest.raises(FileNotFoundError):
+            store.put_file(tmp_path / "missing.bin", "job/step.bin")
+
+        with pytest.raises(FileNotFoundError):
+            store.get_file("missing/key.bin", tmp_path / "out.bin")
+
+
+def test_store_from_uri_routing(tmp_path: Path) -> None:
+    http_store = store_from_uri("http://127.0.0.1:9000/bucket")
+    assert isinstance(http_store, HTTPPresignedStore)
+
+    https_store = store_from_uri("https://storage.example.com/presigned/")
+    assert isinstance(https_store, HTTPPresignedStore)
+    assert https_store.base_url == "https://storage.example.com/presigned"
+
+    file_dir = tmp_path / "file_mirror"
+    file_store = store_from_uri(file_dir.as_uri())
+    assert isinstance(file_store, LocalMirrorObjectStore)
+    assert file_store.root_dir == file_dir
+
+    plain_dir = tmp_path / "plain_mirror"
+    plain_store = store_from_uri(str(plain_dir))
+    assert isinstance(plain_store, LocalMirrorObjectStore)
+    assert plain_store.root_dir == plain_dir
+
+    gs_mirror = tmp_path / "gs_mirror"
+    gs_store = store_from_uri("gs://computeharbor-ckpt", mirror_root=gs_mirror)
+    assert isinstance(gs_store, LocalMirrorObjectStore)
+    assert gs_store.root_dir == gs_mirror
+    assert gs_store.scheme == "gs"
+
+    s3_mirror = tmp_path / "s3_mirror"
+    s3_store = store_from_uri("s3://computeharbor-ckpt", mirror_root=s3_mirror)
+    assert isinstance(s3_store, LocalMirrorObjectStore)
+    assert s3_store.root_dir == s3_mirror
+    assert s3_store.scheme == "s3"
+
+    with pytest.raises(ValueError, match="mirror_root is required"):
+        store_from_uri("gs://computeharbor-ckpt")
+
+    with pytest.raises(ValueError, match="mirror_root is required"):
+        store_from_uri("s3://computeharbor-ckpt")
+
+    with pytest.raises(ValueError, match="empty"):
+        store_from_uri("")
+
+    with pytest.raises(ValueError, match="Unsupported store URI scheme"):
+        store_from_uri("ftp://example.com/ckpt")

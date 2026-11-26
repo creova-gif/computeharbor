@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
+	"github.com/creova-gif/computeharbor/pkg/events"
 )
 
 func TestCLISingleQuoteAndRank(t *testing.T) {
@@ -245,6 +247,110 @@ func TestRunServeRateLimitFlags(t *testing.T) {
 	}
 	if got := doReq("org-rate-test"); got != http.StatusTooManyRequests {
 		t.Fatalf("second request status = %d, want 429", got)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("runServe returned error: %v", err)
+	}
+}
+
+func TestRunServeWebhookDelivery(t *testing.T) {
+	type deliveredWebhook struct {
+		body []byte
+		sig  string
+	}
+	receivedCh := make(chan deliveredWebhook, 4)
+
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		receivedCh <- deliveredWebhook{
+			body: body,
+			sig:  r.Header.Get(events.SignatureHeader),
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer receiver.Close()
+
+	const webhookSecret = "test-webhook-secret"
+
+	pr, pw := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		errCh <- runServe(ctx, []string{
+			"-addr", "127.0.0.1:0",
+			"-webhook-url", receiver.URL,
+			"-webhook-secret", webhookSecret,
+		}, pw)
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	if !scanner.Scan() {
+		cancel()
+		<-errCh
+		t.Fatalf("expected listen line, scan err: %v", scanner.Err())
+	}
+	line := scanner.Text()
+	const prefix = "computeharbor control plane listening on "
+	if !strings.HasPrefix(line, prefix) {
+		cancel()
+		<-errCh
+		t.Fatalf("unexpected listen line %q", line)
+	}
+	addr := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+
+	go func() {
+		_, _ = io.Copy(io.Discard, pr)
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	payload := `{"job_id":"job-wh-1","org_id":"org-wh","gpu":"nvidia-l4-24gb","target_steps":10,"max_preemptions":1}`
+	resp, err := client.Post("http://"+addr+"/v1/jobs", "application/json", strings.NewReader(payload))
+	if err != nil {
+		cancel()
+		<-errCh
+		t.Fatalf("POST /v1/jobs: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		cancel()
+		<-errCh
+		t.Fatalf("POST /v1/jobs status = %d, want 201", resp.StatusCode)
+	}
+
+	var got deliveredWebhook
+	select {
+	case got = <-receivedCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-errCh
+		t.Fatal("timed out waiting for job.submitted webhook delivery")
+	}
+
+	if !events.VerifySignature(webhookSecret, got.body, got.sig) {
+		t.Fatalf("invalid webhook signature %q for payload %s", got.sig, string(got.body))
+	}
+
+	var evt events.Event
+	if err := json.Unmarshal(got.body, &evt); err != nil {
+		t.Fatalf("unmarshal webhook event: %v", err)
+	}
+	if evt.Type != events.EventJobSubmitted {
+		t.Errorf("evt.Type = %q, want %q", evt.Type, events.EventJobSubmitted)
+	}
+	if evt.JobID != "job-wh-1" {
+		t.Errorf("evt.JobID = %q, want %q", evt.JobID, "job-wh-1")
+	}
+	if evt.OrgID != "org-wh" {
+		t.Errorf("evt.OrgID = %q, want %q", evt.OrgID, "org-wh")
 	}
 
 	cancel()

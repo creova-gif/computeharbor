@@ -70,6 +70,7 @@ func (s *Server) StartReaper(ctx context.Context, interval, ttl time.Duration) <
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /v1/jobs", s.handleListJobs)
 	s.mux.HandleFunc("POST /v1/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)

@@ -234,3 +234,65 @@ func TestWebhookDispatcherPermanentFailureCounter(t *testing.T) {
 		t.Fatalf("FailedCount() = %d, want 1", d.FailedCount())
 	}
 }
+
+func TestValidateWebhookURL(t *testing.T) {
+	valid := []string{
+		"http://127.0.0.1:8080/webhook",
+		"https://hooks.example.com/computeharbor",
+		"HTTPS://hooks.example.com:8443/events",
+	}
+	for _, raw := range valid {
+		if err := ValidateWebhookURL(raw); err != nil {
+			t.Errorf("ValidateWebhookURL(%q) unexpected error: %v", raw, err)
+		}
+	}
+
+	invalid := []struct {
+		name string
+		url  string
+	}{
+		{name: "empty", url: ""},
+		{name: "whitespace", url: "   "},
+		{name: "file scheme", url: "file:///etc/passwd"},
+		{name: "ftp scheme", url: "ftp://files.example.com/hook"},
+		{name: "empty host", url: "https:///webhook"},
+		{name: "port only host", url: "http://:8080/webhook"},
+		{name: "embedded userinfo", url: "https://user:pass@example.com/webhook"},
+		{name: "embedded username only", url: "https://token@example.com/webhook"},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateWebhookURL(tc.url); err == nil {
+				t.Fatalf("ValidateWebhookURL(%q) expected error, got nil", tc.url)
+			}
+		})
+	}
+}
+
+func TestWebhookDispatcherRejectsRedirects(t *testing.T) {
+	var targetHits atomic.Int32
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+
+	redirectSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetSrv.URL, http.StatusFound)
+	}))
+	defer redirectSrv.Close()
+
+	d := NewWebhookDispatcher(redirectSrv.URL, "secret", 8).WithRetry(0, 0)
+	d.Emit(Event{ID: "evt-redirect", Type: EventJobSubmitted, JobID: "job-redirect"})
+	d.Close()
+
+	if got := targetHits.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests, want 0", got)
+	}
+	if d.DeliveredCount() != 0 {
+		t.Fatalf("DeliveredCount() = %d, want 0", d.DeliveredCount())
+	}
+	if d.FailedCount() != 1 {
+		t.Fatalf("FailedCount() = %d, want 1", d.FailedCount())
+	}
+}

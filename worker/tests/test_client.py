@@ -17,7 +17,10 @@ class _MockServerState:
     def __init__(self, responses: list[tuple[int, dict[str, Any], dict[str, str]]]) -> None:
         self.responses = list(responses)
         self.calls: int = 0
+        self.paths: list[str] = []
         self.auth_headers: list[str | None] = []
+        self.org_headers: list[str | None] = []
+        self.request_id_headers: list[str | None] = []
         self.lock = threading.Lock()
 
 
@@ -37,7 +40,10 @@ def _mock_control_plane(state: _MockServerState) -> Iterator[str]:
             with state.lock:
                 idx = min(state.calls, len(state.responses) - 1)
                 status, body_obj, extra_headers = state.responses[idx]
+                state.paths.append(self.path)
                 state.auth_headers.append(self.headers.get("Authorization"))
+                state.org_headers.append(self.headers.get("X-Org-ID"))
+                state.request_id_headers.append(self.headers.get("X-Request-ID"))
                 state.calls += 1
 
             raw = json.dumps(body_obj).encode("utf-8")
@@ -210,3 +216,59 @@ def test_omits_bearer_auth_when_unset_or_empty(monkeypatch: pytest.MonkeyPatch) 
         empty_client.healthz()
 
     assert state.auth_headers == [None, None]
+
+
+def test_readyz_calls_without_org_header_and_returns_ready() -> None:
+    state = _MockServerState([(200, {"status": "ready"}, {})])
+    with _mock_control_plane(state) as base_url:
+        client = ControlPlaneClient(base_url=base_url, org_id="org-test")
+        res = client.readyz()
+
+    assert res == {"status": "ready"}
+    assert state.paths == ["/readyz"]
+    assert state.org_headers == [None]
+
+
+def test_readyz_raises_control_plane_error_on_503() -> None:
+    state = _MockServerState([(503, {"error": "Service Unavailable"}, {})])
+    with _mock_control_plane(state) as base_url:
+        client = ControlPlaneClient(
+            base_url=base_url,
+            org_id="org-test",
+            max_retries=1,
+            backoff_base_sec=0.001,
+        )
+        with pytest.raises(ControlPlaneError) as exc_info:
+            client.readyz()
+
+    assert exc_info.value.status_code == 503
+    assert "Service Unavailable" in exc_info.value.message
+    assert state.paths == ["/readyz", "/readyz"]
+    assert state.org_headers == [None, None]
+
+
+def test_captures_x_request_id_from_response_and_sends_custom_request_id() -> None:
+    state = _MockServerState(
+        [
+            (200, {"status": "ok"}, {"X-Request-ID": "srv-req-1"}),
+            (200, {"status": "ok"}, {"X-Request-ID": "custom-req-42"}),
+            (404, {"error": "not found"}, {"X-Request-ID": "err-req-99"}),
+        ]
+    )
+    with _mock_control_plane(state) as base_url:
+        client = ControlPlaneClient(base_url=base_url, org_id="org-test")
+        assert client.last_request_id is None
+
+        client.healthz()
+        assert client.last_request_id == "srv-req-1"
+
+        client._request("GET", "/healthz", include_org_header=False, request_id="custom-req-42")
+        assert client.last_request_id == "custom-req-42"
+
+        with pytest.raises(ControlPlaneError) as exc_info:
+            client.get_job("missing-job")
+        assert exc_info.value.status_code == 404
+        assert client.last_request_id == "err-req-99"
+
+    assert state.request_id_headers == [None, "custom-req-42", None]
+

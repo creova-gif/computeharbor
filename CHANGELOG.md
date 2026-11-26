@@ -8,11 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Prometheus Observability (`pkg/server`):** `GET /metrics` endpoint emitting Prometheus `0.0.4` text metrics (`ADR-003`).
+- **Prometheus Observability & Grafana Dashboard (`pkg/server`, `deploy/`):** `GET /metrics` endpoint emitting Prometheus `0.0.4` text metrics (`ADR-003`) and pre-built `deploy/grafana-dashboard.json`.
 - **Coordinator Snapshot Persistence (`pkg/orchestrator`, `control-plane/`):** `CoordinatorSnapshot` atomic JSON persistence and `-state-file` flag on `computeharbor serve` for crash/restart recovery.
 - **Presigned Object Store (`worker/`):** `HTTPPresignedStore` and `store_from_uri` factory supporting `http://`, `https://`, `file://`, `gs://`, and `s3://` checkpoint replication targets.
 - **Cloud Metadata Spot Watcher (`worker/`):** `MetadataPreemptionWatcher` with `--metadata-provider gcp|aws` in `computeharbor_worker.daemon` to poll cloud preemption endpoints and trigger `SIGTERM` checkpointing.
-- **Container & Compose Deployment (`Dockerfile`, `Dockerfile.worker`, `docker-compose.yml`, `deploy/prometheus.yml`):** Distroless Go control-plane image, Python 3.12 worker image, and Docker Compose stack with Prometheus scraping.
+- **Container, Compose & Kubernetes Deployment (`Dockerfile`, `Dockerfile.worker`, `docker-compose.yml`, `deploy/`):** Distroless Go control-plane image, Python 3.12 worker image, Docker Compose stack with Prometheus scraping, and Kubernetes manifests (`deploy/k8s/control-plane.yaml`, `deploy/k8s/worker-job.yaml`).
+- **Spot Pool Failover & Supervisor (`pkg/server`, `worker/`):** `POST /v1/schedule` endpoint for pool selection with exclusions, bounded exponential backoff retry in `ControlPlaneClient`, `run_job_with_failover` supervisor, and `computeharbor-worker` / `computeharbor-supervisor` CLI entrypoints.
+- **Rate Limiting & Structured Logging (`pkg/server`, `control-plane/`):** Per-org `OrgRateLimiter` token-bucket middleware, `slog` JSON HTTP request logging, and `-rate-limit-rps`, `-rate-limit-burst`, `-log-json` flags (`ADR-004`).
+- **Job Cancellation & Lifecycle Webhooks (`pkg/orchestrator`, `pkg/server`, `pkg/events`):** Idempotent `CancelJob` (`POST /v1/jobs/{id}/cancel`) and async HMAC-SHA256 webhook event dispatcher wired via `-webhook-url` and `-webhook-secret` (`ADR-005`).
+- **Multi-Region Fleet Scoring (`pkg/cost`, `pkg/server`):** `GET /v1/fleet/rank` endpoint scoring spot pools by price and regional availability.
+- **Checkpointed Batch Inference (`worker/`):** `BatchInferenceRunner` and `computeharbor-batch` CLI with atomic `SIGTERM` cursor recovery, throughput, and estimated cost-per-million-records telemetry.
+- **Distributed Ring Barrier & Org Billing (`pkg/orchestrator`, `pkg/server`):** `RingBarrier` multi-worker synchronization primitive and `BillingSummary` (`GET /v1/billing/summary`).
+- **CLI Subcommands & API Docs (`control-plane/`, `docs/`, `examples/`):** `computeharbor status` and `computeharbor savings` subcommands, OpenAPI 3.1 specification (`docs/openapi.yaml`), and Python/Go quickstart examples (`examples/quickstart.py`, `examples/control_plane_client.go`).
 
 ## [0.1.0] - 2026-11-25
 

@@ -45,6 +45,7 @@ def run_worker_daemon(
     metadata_provider: MetadataProvider | None = None,
     metadata_url: str | None = None,
     metadata_poll_sec: float = 0.5,
+    max_checkpoints: int = 5,
 ) -> RunResult:
     """Assign this worker to a job, stream heartbeats, train, and commit checkpoints."""
     ckpt_dir = Path(checkpoint_dir)
@@ -75,6 +76,7 @@ def run_worker_daemon(
             config=config or LoRAConfig(),
             checkpoint_dir=ckpt_dir,
             remote_store=remote_store,
+            max_checkpoints=max_checkpoints,
         )
         result = trainer.train(
             target_steps=target_steps,
@@ -126,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata-provider", choices=["gcp", "aws"], default=None)
     parser.add_argument("--metadata-url", default=None)
     parser.add_argument("--metadata-poll-sec", type=float, default=0.5)
+    parser.add_argument("--max-checkpoints", type=int, default=5)
     args = parser.parse_args(argv)
 
     remote_store: CheckpointStore | None = (
@@ -146,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         metadata_provider=args.metadata_provider,
         metadata_url=args.metadata_url,
         metadata_poll_sec=args.metadata_poll_sec,
+        max_checkpoints=args.max_checkpoints,
     )
     output_json = result.summary.model_dump_json(indent=2)
     if args.summary_out:

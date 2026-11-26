@@ -78,10 +78,16 @@ class CheckpointManager:
         self,
         checkpoint_dir: Path | str,
         remote_store: CheckpointStore | None = None,
+        max_checkpoints: int = 5,
     ) -> None:
+        if max_checkpoints < 0:
+            raise ValueError(
+                f"max_checkpoints must be >= 0 (0 for unlimited), got {max_checkpoints}"
+            )
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.remote_store = remote_store
+        self.max_checkpoints = max_checkpoints
         self.reconcile_stale_temporaries()
 
     def reconcile_stale_temporaries(self) -> int:
@@ -90,6 +96,26 @@ class CheckpointManager:
             stale.unlink(missing_ok=True)
             removed += 1
         return removed
+
+    def prune_old_checkpoints(self) -> int:
+        """Remove oldest checkpoint pairs beyond max_checkpoints; 0 means unlimited."""
+        if self.max_checkpoints == 0:
+            return 0
+        manifests = sorted(
+            self.checkpoint_dir.glob("step-*.manifest.json"),
+            key=lambda p: p.name,
+        )
+        excess = len(manifests) - self.max_checkpoints
+        if excess <= 0:
+            return 0
+        pruned = 0
+        for manifest_path in manifests[:excess]:
+            st_name = manifest_path.name.removesuffix(".manifest.json") + ".safetensors"
+            st_path = self.checkpoint_dir / st_name
+            manifest_path.unlink(missing_ok=True)
+            st_path.unlink(missing_ok=True)
+            pruned += 1
+        return pruned
 
     def save(
         self,
@@ -148,6 +174,7 @@ class CheckpointManager:
         _atomic_write_bytes(latest_manifest_path, manifest_bytes)
         if self.remote_store is not None:
             self.remote_store.put_file(step_manifest_path, f"{job_id}/{step_manifest_path.name}")
+        self.prune_old_checkpoints()
         return manifest
 
     def has_latest(self) -> bool:

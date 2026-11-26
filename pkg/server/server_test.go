@@ -812,3 +812,126 @@ func TestStartSnapshotterPeriodicAndShutdown(t *testing.T) {
 		t.Fatalf("expected error log on snapshot failure, got %q", logBuf.String())
 	}
 }
+
+func TestListJobsFilterAndPagination(t *testing.T) {
+	coord := orchestrator.NewCoordinator()
+	srv := server.New(coord)
+
+	// Create 3 QUEUED jobs and 2 COMPLETED jobs for org-alpha, plus 1 for org-beta.
+	for _, id := range []string{"job-1", "job-2", "job-3", "job-4", "job-5"} {
+		if _, err := coord.SubmitJob(id, "org-alpha", cost.GPUL4, 10, 1); err != nil {
+			t.Fatalf("SubmitJob %s: %v", id, err)
+		}
+	}
+	if _, err := coord.SubmitJob("job-other", "org-beta", cost.GPUL4, 10, 1); err != nil {
+		t.Fatalf("SubmitJob job-other: %v", err)
+	}
+
+	for _, id := range []string{"job-2", "job-4"} {
+		if _, err := coord.AssignWorker(id, "worker-1"); err != nil {
+			t.Fatalf("AssignWorker %s: %v", id, err)
+		}
+		if _, err := coord.CommitCheckpoint(id, orchestrator.CheckpointRef{
+			Step:           10,
+			SafetensorsURI: "s3://ckpt/" + id + "/model.safetensors",
+			ManifestURI:    "s3://ckpt/" + id + "/manifest.json",
+		}); err != nil {
+			t.Fatalf("CommitCheckpoint %s: %v", id, err)
+		}
+	}
+
+	// Backward compatibility: no query params returns all 5 org-alpha jobs + X-Total-Count=5.
+	rec := doJSON(t, srv, http.MethodGet, "/v1/jobs", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "5" {
+		t.Fatalf("X-Total-Count = %q, want %q", got, "5")
+	}
+	var allJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &allJobs); err != nil {
+		t.Fatalf("decode all jobs: %v", err)
+	}
+	if len(allJobs) != 5 {
+		t.Fatalf("len(allJobs) = %d, want 5", len(allJobs))
+	}
+
+	// Status filtering: ?status=QUEUED -> job-1, job-3, job-5; X-Total-Count=3.
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs?status=QUEUED", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs?status=QUEUED = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "3" {
+		t.Fatalf("QUEUED X-Total-Count = %q, want %q", got, "3")
+	}
+	var queuedJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &queuedJobs); err != nil {
+		t.Fatalf("decode queued jobs: %v", err)
+	}
+	if len(queuedJobs) != 3 || queuedJobs[0].JobID != "job-1" || queuedJobs[1].JobID != "job-3" || queuedJobs[2].JobID != "job-5" {
+		t.Fatalf("queued jobs = %+v, want [job-1, job-3, job-5]", queuedJobs)
+	}
+
+	// Status filtering: ?status=COMPLETED -> job-2, job-4; X-Total-Count=2.
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs?status=COMPLETED", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs?status=COMPLETED = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "2" {
+		t.Fatalf("COMPLETED X-Total-Count = %q, want %q", got, "2")
+	}
+	var completedJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &completedJobs); err != nil {
+		t.Fatalf("decode completed jobs: %v", err)
+	}
+	if len(completedJobs) != 2 || completedJobs[0].JobID != "job-2" || completedJobs[1].JobID != "job-4" {
+		t.Fatalf("completed jobs = %+v, want [job-2, job-4]", completedJobs)
+	}
+
+	// Pagination: ?limit=2&offset=1 -> job-2, job-3; X-Total-Count=5.
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs?limit=2&offset=1", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs?limit=2&offset=1 = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "5" {
+		t.Fatalf("paged X-Total-Count = %q, want %q", got, "5")
+	}
+	var pagedJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &pagedJobs); err != nil {
+		t.Fatalf("decode paged jobs: %v", err)
+	}
+	if len(pagedJobs) != 2 || pagedJobs[0].JobID != "job-2" || pagedJobs[1].JobID != "job-3" {
+		t.Fatalf("paged jobs = %+v, want [job-2, job-3]", pagedJobs)
+	}
+
+	// Offset past end -> [] with X-Total-Count=5.
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs?offset=10", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs?offset=10 = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Total-Count"); got != "5" {
+		t.Fatalf("offset-past-end X-Total-Count = %q, want %q", got, "5")
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("offset-past-end body = %q, want []", rec.Body.String())
+	}
+
+	// Validation: 400 Bad Request on invalid query params.
+	invalidCases := []struct {
+		query   string
+		wantMsg string
+	}{
+		{"?status=BOGUS", "invalid status filter"},
+		{"?limit=-1", "limit must be a non-negative integer"},
+		{"?offset=abc", "offset must be a non-negative integer"},
+	}
+	for _, tc := range invalidCases {
+		rec = doJSON(t, srv, http.MethodGet, "/v1/jobs"+tc.query, "org-alpha", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("GET /v1/jobs%s = %d, want 400", tc.query, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), tc.wantMsg) {
+			t.Fatalf("GET /v1/jobs%s body = %q, want %q", tc.query, rec.Body.String(), tc.wantMsg)
+		}
+	}
+}

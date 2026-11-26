@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
+	"github.com/creova-gif/computeharbor/pkg/events"
 )
 
 type JobStatus string
@@ -70,6 +72,8 @@ type Coordinator struct {
 	jobs             map[string]*JobLease
 	now              func() time.Time
 	totalCheckpoints int
+	sink             events.Sink
+	eventSeq         atomic.Uint64
 }
 
 func NewCoordinator() *Coordinator {
@@ -86,6 +90,27 @@ func (c *Coordinator) WithClock(clock func() time.Time) *Coordinator {
 	return c
 }
 
+// WithEventSink configures an optional event sink for job lifecycle transitions.
+func (c *Coordinator) WithEventSink(sink events.Sink) *Coordinator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sink = sink
+	return c
+}
+
+func (c *Coordinator) newEvent(eventType events.EventType, lease JobLease) events.Event {
+	seq := c.eventSeq.Add(1)
+	return events.Event{
+		ID:        fmt.Sprintf("evt-%d", seq),
+		Type:      eventType,
+		OrgID:     lease.OrgID,
+		JobID:     lease.JobID,
+		Step:      lease.CurrentStep,
+		Status:    string(lease.Status),
+		Timestamp: lease.UpdatedAt,
+	}
+}
+
 func (c *Coordinator) SubmitJob(jobID, orgID string, gpu cost.GPUType, targetSteps, maxPreemptions int) (JobLease, error) {
 	if jobID == "" || orgID == "" || targetSteps <= 0 || maxPreemptions < 0 {
 		return JobLease{}, fmt.Errorf("%w: invalid job parameters", ErrInvalidTransition)
@@ -93,6 +118,14 @@ func (c *Coordinator) SubmitJob(jobID, orgID string, gpu cost.GPUType, targetSte
 	if _, err := cost.LookupQuote(gpu); err != nil {
 		return JobLease{}, err
 	}
+
+	var sink events.Sink
+	var evt *events.Event
+	defer func() {
+		if sink != nil && evt != nil {
+			sink.Emit(*evt)
+		}
+	}()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -111,10 +144,24 @@ func (c *Coordinator) SubmitJob(jobID, orgID string, gpu cost.GPUType, targetSte
 		UpdatedAt:      c.now(),
 	}
 	c.jobs[jobID] = lease
-	return cloneLease(lease), nil
+	cloned := cloneLease(lease)
+	if c.sink != nil {
+		sink = c.sink
+		e := c.newEvent(events.EventJobSubmitted, cloned)
+		evt = &e
+	}
+	return cloned, nil
 }
 
 func (c *Coordinator) AssignWorker(jobID, workerNodeID string) (JobLease, error) {
+	var sink events.Sink
+	var evt *events.Event
+	defer func() {
+		if sink != nil && evt != nil {
+			sink.Emit(*evt)
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -134,7 +181,13 @@ func (c *Coordinator) AssignWorker(jobID, workerNodeID string) (JobLease, error)
 	job.Status = StatusRunning
 	job.LastHeartbeatAt = now
 	job.UpdatedAt = now
-	return cloneLease(job), nil
+	cloned := cloneLease(job)
+	if c.sink != nil {
+		sink = c.sink
+		e := c.newEvent(events.EventJobAssigned, cloned)
+		evt = &e
+	}
+	return cloned, nil
 }
 
 func (c *Coordinator) Heartbeat(jobID, workerNodeID string) (JobLease, error) {
@@ -163,6 +216,16 @@ func (c *Coordinator) ReapStaleLeases(ttl time.Duration) []JobLease {
 		return nil
 	}
 
+	var sink events.Sink
+	var evts []events.Event
+	defer func() {
+		if sink != nil {
+			for _, e := range evts {
+				sink.Emit(e)
+			}
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -175,8 +238,10 @@ func (c *Coordinator) ReapStaleLeases(ttl time.Duration) []JobLease {
 		if now.Sub(job.LastHeartbeatAt) <= ttl {
 			continue
 		}
+		evtType := events.EventJobPreempted
 		if job.PreemptionCount >= job.MaxPreemptions {
 			job.Status = StatusFailed
+			evtType = events.EventJobFailed
 		} else {
 			job.Status = StatusMigrating
 		}
@@ -184,12 +249,25 @@ func (c *Coordinator) ReapStaleLeases(ttl time.Duration) []JobLease {
 		job.PreemptedAt = now
 		job.UpdatedAt = now
 		job.WorkerNodeID = ""
-		reaped = append(reaped, cloneLease(job))
+		cloned := cloneLease(job)
+		reaped = append(reaped, cloned)
+		if c.sink != nil {
+			sink = c.sink
+			evts = append(evts, c.newEvent(evtType, cloned))
+		}
 	}
 	return reaped
 }
 
 func (c *Coordinator) NotifySIGTERM(jobID string) (JobLease, error) {
+	var sink events.Sink
+	var evt *events.Event
+	defer func() {
+		if sink != nil && evt != nil {
+			sink.Emit(*evt)
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -206,7 +284,13 @@ func (c *Coordinator) NotifySIGTERM(jobID string) (JobLease, error) {
 	if job.PreemptionCount >= job.MaxPreemptions {
 		job.Status = StatusFailed
 		job.UpdatedAt = c.now()
-		return cloneLease(job), ErrMaxPreemptions
+		cloned := cloneLease(job)
+		if c.sink != nil {
+			sink = c.sink
+			e := c.newEvent(events.EventJobFailed, cloned)
+			evt = &e
+		}
+		return cloned, ErrMaxPreemptions
 	}
 
 	now := c.now()
@@ -214,10 +298,24 @@ func (c *Coordinator) NotifySIGTERM(jobID string) (JobLease, error) {
 	job.PreemptionCount++
 	job.PreemptedAt = now
 	job.UpdatedAt = now
-	return cloneLease(job), nil
+	cloned := cloneLease(job)
+	if c.sink != nil {
+		sink = c.sink
+		e := c.newEvent(events.EventJobPreempted, cloned)
+		evt = &e
+	}
+	return cloned, nil
 }
 
 func (c *Coordinator) CommitCheckpoint(jobID string, ref CheckpointRef) (JobLease, error) {
+	var sink events.Sink
+	var evt *events.Event
+	defer func() {
+		if sink != nil && evt != nil {
+			sink.Emit(*evt)
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -238,18 +336,34 @@ func (c *Coordinator) CommitCheckpoint(jobID string, ref CheckpointRef) (JobLeas
 	job.UpdatedAt = c.now()
 	c.totalCheckpoints++
 
+	evtType := events.EventJobCheckpointed
 	if ref.Step >= job.TargetSteps {
 		job.Status = StatusCompleted
+		evtType = events.EventJobCompleted
 	} else if job.Status == StatusCheckpointing {
 		job.Status = StatusMigrating
 		job.WorkerNodeID = ""
 	}
-	return cloneLease(job), nil
+	cloned := cloneLease(job)
+	if c.sink != nil {
+		sink = c.sink
+		e := c.newEvent(evtType, cloned)
+		evt = &e
+	}
+	return cloned, nil
 }
 
 // CancelJob transitions a non-terminal job to StatusCancelled, clearing its
 // active worker assignment. Cancelling an already-cancelled job is idempotent.
 func (c *Coordinator) CancelJob(jobID string) (JobLease, error) {
+	var sink events.Sink
+	var evt *events.Event
+	defer func() {
+		if sink != nil && evt != nil {
+			sink.Emit(*evt)
+		}
+	}()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -267,7 +381,13 @@ func (c *Coordinator) CancelJob(jobID string) (JobLease, error) {
 	job.Status = StatusCancelled
 	job.WorkerNodeID = ""
 	job.UpdatedAt = c.now()
-	return cloneLease(job), nil
+	cloned := cloneLease(job)
+	if c.sink != nil {
+		sink = c.sink
+		e := c.newEvent(events.EventJobCancelled, cloned)
+		evt = &e
+	}
+	return cloned, nil
 }
 
 func (c *Coordinator) GetJob(jobID string) (JobLease, error) {

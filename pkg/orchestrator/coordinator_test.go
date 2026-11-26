@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
+	"github.com/creova-gif/computeharbor/pkg/events"
 )
 
 func TestPreemptionLifecycleThreeEvictions(t *testing.T) {
@@ -361,5 +362,110 @@ func TestCancelJob(t *testing.T) {
 	}
 	if _, err := coord.CancelJob("job-done"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("CancelJob(COMPLETED) = %v, want ErrInvalidTransition", err)
+	}
+}
+
+type recordingSink struct {
+	mu     sync.Mutex
+	events []events.Event
+	onEmit func(events.Event)
+}
+
+func (s *recordingSink) Emit(evt events.Event) {
+	if s.onEmit != nil {
+		s.onEmit(evt)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, evt)
+}
+
+func TestCoordinatorLifecycleEventEmission(t *testing.T) {
+	now := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	var coord *Coordinator
+	sink := &recordingSink{
+		onEmit: func(evt events.Event) {
+			// Calling GetJob inside Emit verifies c.mu is unlocked before emission.
+			if _, err := coord.GetJob(evt.JobID); err != nil {
+				t.Errorf("GetJob(%s) inside Emit failed: %v", evt.JobID, err)
+			}
+		},
+	}
+	coord = NewCoordinator().WithClock(func() time.Time { return now }).WithEventSink(sink)
+
+	// 1. Submit -> Assign -> SIGTERM -> Checkpoint -> Reap (preempt) -> Assign -> Complete.
+	if _, err := coord.SubmitJob("job-1", "org-a", cost.GPUA100_40G, 10, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-1", "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := coord.NotifySIGTERM("job-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	if _, err := coord.CommitCheckpoint("job-1", CheckpointRef{Step: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-1", "node-2"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Minute)
+	if reaped := coord.ReapStaleLeases(time.Minute); len(reaped) != 1 {
+		t.Fatalf("expected 1 reaped lease, got %d", len(reaped))
+	}
+	if _, err := coord.AssignWorker("job-1", "node-3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.CommitCheckpoint("job-1", CheckpointRef{Step: 10}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Submit -> Cancel.
+	if _, err := coord.SubmitJob("job-2", "org-a", cost.GPUL4, 5, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.CancelJob("job-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Submit -> Assign -> SIGTERM with maxPreemptions=0 -> Failed.
+	if _, err := coord.SubmitJob("job-3", "org-a", cost.GPUL4, 5, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-3", "node-4"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.NotifySIGTERM("job-3"); !errors.Is(err, ErrMaxPreemptions) {
+		t.Fatalf("expected ErrMaxPreemptions, got %v", err)
+	}
+
+	wantTypes := []events.EventType{
+		events.EventJobSubmitted,
+		events.EventJobAssigned,
+		events.EventJobPreempted,
+		events.EventJobCheckpointed,
+		events.EventJobAssigned,
+		events.EventJobPreempted,
+		events.EventJobAssigned,
+		events.EventJobCompleted,
+		events.EventJobSubmitted,
+		events.EventJobCancelled,
+		events.EventJobSubmitted,
+		events.EventJobAssigned,
+		events.EventJobFailed,
+	}
+
+	if len(sink.events) != len(wantTypes) {
+		t.Fatalf("emitted %d events, want %d: %+v", len(sink.events), len(wantTypes), sink.events)
+	}
+	for i, wantType := range wantTypes {
+		if sink.events[i].Type != wantType {
+			t.Errorf("event[%d].Type = %s, want %s", i, sink.events[i].Type, wantType)
+		}
+		if sink.events[i].ID == "" {
+			t.Errorf("event[%d].ID is empty", i)
+		}
 	}
 }

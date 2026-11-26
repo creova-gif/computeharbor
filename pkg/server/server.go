@@ -18,13 +18,21 @@ import (
 
 const maxBodyBytes = 1 << 20 // 1 MiB
 
+// WebhookStats exposes delivery, failure, and drop counters from a webhook dispatcher.
+type WebhookStats interface {
+	DeliveredCount() int64
+	FailedCount() int64
+	DroppedCount() int64
+}
+
 // Server exposes the ComputeHarbor control plane over HTTP/JSON.
 type Server struct {
-	coord   *orchestrator.Coordinator
-	mux     *http.ServeMux
-	logger  *slog.Logger
-	limiter *OrgRateLimiter
-	apiKey  string
+	coord        *orchestrator.Coordinator
+	mux          *http.ServeMux
+	logger       *slog.Logger
+	limiter      *OrgRateLimiter
+	apiKey       string
+	webhookStats WebhookStats
 }
 
 // New constructs a Server wrapping the provided Coordinator.
@@ -56,6 +64,12 @@ func (s *Server) WithRateLimit(rps float64, burst int) *Server {
 // WithAPIKey configures optional Bearer token authentication on the Server.
 func (s *Server) WithAPIKey(token string) *Server {
 	s.apiKey = token
+	return s
+}
+
+// WithWebhookStats configures webhook delivery metrics reporting on the Server.
+func (s *Server) WithWebhookStats(stats WebhookStats) *Server {
+	s.webhookStats = stats
 	return s
 }
 

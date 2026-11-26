@@ -127,3 +127,33 @@ func TestMetricsLifecycle(t *testing.T) {
 	assertMetricLine(t, afterReassign, `computeharbor_checkpoints_total 1`)
 	assertMetricLine(t, afterReassign, `computeharbor_max_recovery_duration_ms 250`)
 }
+
+type stubWebhookStats struct {
+	delivered int64
+	failed    int64
+	dropped   int64
+}
+
+func (s stubWebhookStats) DeliveredCount() int64 { return s.delivered }
+func (s stubWebhookStats) FailedCount() int64    { return s.failed }
+func (s stubWebhookStats) DroppedCount() int64   { return s.dropped }
+
+func TestMetricsWebhookCounters(t *testing.T) {
+	srv := server.New(orchestrator.NewCoordinator())
+
+	withoutStats := getMetrics(t, srv)
+	if strings.Contains(withoutStats, "computeharbor_webhook_") {
+		t.Fatalf("unexpected webhook metrics when WebhookStats is nil:\n%s", withoutStats)
+	}
+
+	srv.WithWebhookStats(stubWebhookStats{
+		delivered: 42,
+		failed:    3,
+		dropped:   7,
+	})
+
+	withStats := getMetrics(t, srv)
+	assertMetricLine(t, withStats, "computeharbor_webhook_delivered_total 42")
+	assertMetricLine(t, withStats, "computeharbor_webhook_failed_total 3")
+	assertMetricLine(t, withStats, "computeharbor_webhook_dropped_total 7")
+}

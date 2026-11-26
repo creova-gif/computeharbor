@@ -142,13 +142,18 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 			return fmt.Errorf("load coordinator state: %w", err)
 		}
 	}
+	var webhookStats server.WebhookStats
 	if cfg.webhookURL != "" {
 		dispatcher := events.NewWebhookDispatcher(cfg.webhookURL, cfg.webhookSecret, 256)
 		coord.WithEventSink(dispatcher)
 		defer dispatcher.Close()
+		webhookStats = dispatcher
 	}
 
 	api := server.New(coord)
+	if webhookStats != nil {
+		api.WithWebhookStats(webhookStats)
+	}
 	if cfg.logJSON {
 		api.WithLogger(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	}

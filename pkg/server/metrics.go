@@ -40,6 +40,20 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE computeharbor_max_recovery_duration_ms gauge\n")
 	fmt.Fprintf(&b, "computeharbor_max_recovery_duration_ms %d\n", stats.MaxRecoveryDurMs)
 
+	if s.webhookStats != nil {
+		b.WriteString("# HELP computeharbor_webhook_delivered_total Total number of delivered webhook events.\n")
+		b.WriteString("# TYPE computeharbor_webhook_delivered_total counter\n")
+		fmt.Fprintf(&b, "computeharbor_webhook_delivered_total %d\n", s.webhookStats.DeliveredCount())
+
+		b.WriteString("# HELP computeharbor_webhook_failed_total Total number of failed webhook deliveries.\n")
+		b.WriteString("# TYPE computeharbor_webhook_failed_total counter\n")
+		fmt.Fprintf(&b, "computeharbor_webhook_failed_total %d\n", s.webhookStats.FailedCount())
+
+		b.WriteString("# HELP computeharbor_webhook_dropped_total Total number of dropped webhook events.\n")
+		b.WriteString("# TYPE computeharbor_webhook_dropped_total counter\n")
+		fmt.Fprintf(&b, "computeharbor_webhook_dropped_total %d\n", s.webhookStats.DroppedCount())
+	}
+
 	w.Header().Set("Content-Type", prometheusContentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(b.String()))

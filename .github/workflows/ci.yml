@@ -9,6 +9,7 @@ jobs:
         with:
           go-version: "1.23"
       - run: test -z "$(gofmt -l pkg control-plane)" && go vet ./... && go test -race -v ./...
+      - run: go test -run=^$ -bench=. -benchmem -benchtime=50ms ./pkg/cost ./pkg/orchestrator
 
   python-worker-and-chaos:
     runs-on: ubuntu-latest

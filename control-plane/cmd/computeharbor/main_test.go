@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -184,5 +186,69 @@ func TestRunServeStateFileFlagCorruptError(t *testing.T) {
 	err := runServe(ctx, []string{"-addr", "127.0.0.1:0", "-state-file", corruptFile}, &buf)
 	if err == nil {
 		t.Fatal("expected error when loading corrupt -state-file, got nil")
+	}
+}
+
+func TestRunServeRateLimitFlags(t *testing.T) {
+	pr, pw := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		errCh <- runServe(ctx, []string{
+			"-addr", "127.0.0.1:0",
+			"-rate-limit-rps", "1",
+			"-rate-limit-burst", "1",
+			"-log-json=true",
+		}, pw)
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	if !scanner.Scan() {
+		cancel()
+		<-errCh
+		t.Fatalf("expected listen line, scan err: %v", scanner.Err())
+	}
+	line := scanner.Text()
+	const prefix = "computeharbor control plane listening on "
+	if !strings.HasPrefix(line, prefix) {
+		cancel()
+		<-errCh
+		t.Fatalf("unexpected listen line %q", line)
+	}
+	addr := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+
+	// Drain any remaining pipe output so pw never blocks.
+	go func() {
+		_, _ = io.Copy(io.Discard, pr)
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	doReq := func(orgID string) int {
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/jobs", nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("X-Org-ID", orgID)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := doReq("org-rate-test"); got != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", got)
+	}
+	if got := doReq("org-rate-test"); got != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429", got)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("runServe returned error: %v", err)
 	}
 }

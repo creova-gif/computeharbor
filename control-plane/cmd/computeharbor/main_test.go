@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +62,7 @@ func TestServeListenerHealthzAndShutdown(t *testing.T) {
 	var buf bytes.Buffer
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveListener(ctx, ln, &buf, 5*time.Second, 30*time.Second)
+		errCh <- serveListener(ctx, ln, &buf, 5*time.Second, 30*time.Second, "")
 	}()
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -89,5 +91,98 @@ func TestRunServeReaperFlagsAndShutdown(t *testing.T) {
 	var buf bytes.Buffer
 	if err := runServe(ctx, []string{"-addr", "127.0.0.1:0", "-reap-interval", "10ms", "-lease-ttl", "50ms"}, &buf); err != nil {
 		t.Fatalf("runServe with reaper flags failed: %v", err)
+	}
+}
+
+func TestServeListenerStateFilePersistence(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	// First run: submit a job and shut down gracefully.
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen 1: %v", err)
+	}
+	addr1 := ln1.Addr().String()
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	var buf1 bytes.Buffer
+	errCh1 := make(chan error, 1)
+	go func() {
+		errCh1 <- serveListener(ctx1, ln1, &buf1, 5*time.Second, 30*time.Second, stateFile)
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	payload := `{"job_id":"job-persist-1","org_id":"org-1","gpu":"nvidia-l4-24gb","target_steps":100,"max_preemptions":2}`
+	resp, err := client.Post("http://"+addr1+"/v1/jobs", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST /v1/jobs: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/jobs status = %d, want 201", resp.StatusCode)
+	}
+
+	cancel1()
+	if err := <-errCh1; err != nil {
+		t.Fatalf("first serveListener returned error: %v", err)
+	}
+
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("expected state file %q to exist after shutdown: %v", stateFile, err)
+	}
+
+	// Second run: reload stateFile and verify the job is present.
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen 2: %v", err)
+	}
+	addr2 := ln2.Addr().String()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	var buf2 bytes.Buffer
+	errCh2 := make(chan error, 1)
+	go func() {
+		errCh2 <- serveListener(ctx2, ln2, &buf2, 5*time.Second, 30*time.Second, stateFile)
+	}()
+
+	resp2Req, err := http.NewRequest(http.MethodGet, "http://"+addr2+"/v1/jobs/job-persist-1", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp2Req.Header.Set("X-Org-ID", "org-1")
+	resp2, err := client.Do(resp2Req)
+	if err != nil {
+		cancel2()
+		<-errCh2
+		t.Fatalf("GET /v1/jobs/job-persist-1: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		cancel2()
+		<-errCh2
+		t.Fatalf("GET /v1/jobs/job-persist-1 status = %d, want 200", resp2.StatusCode)
+	}
+
+	cancel2()
+	if err := <-errCh2; err != nil {
+		t.Fatalf("second serveListener returned error: %v", err)
+	}
+}
+
+func TestRunServeStateFileFlagCorruptError(t *testing.T) {
+	corruptFile := filepath.Join(t.TempDir(), "corrupt.json")
+	if err := os.WriteFile(corruptFile, []byte("{bad-json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var buf bytes.Buffer
+	err := runServe(ctx, []string{"-addr", "127.0.0.1:0", "-state-file", corruptFile}, &buf)
+	if err == nil {
+		t.Fatal("expected error when loading corrupt -state-file, got nil")
 	}
 }

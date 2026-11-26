@@ -10,6 +10,7 @@ from computeharbor_worker.storage import (
     cuda_synchronize_if_available,
     store_from_uri,
 )
+from computeharbor_worker.supervisor import FailoverResult, run_job_with_failover
 from computeharbor_worker.trainer import LoRATrainer, RunResult
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "CheckpointStore",
     "ControlPlaneClient",
     "ControlPlaneError",
+    "FailoverResult",
     "HTTPPresignedStore",
     "LoRAConfig",
     "LoRATrainer",
@@ -27,6 +29,7 @@ __all__ = [
     "RNGStatePayload",
     "RunResult",
     "cuda_synchronize_if_available",
+    "run_job_with_failover",
     "run_worker_daemon",
     "store_from_uri",
 ]

@@ -32,6 +32,8 @@ func TestUIEndpoint(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"ComputeHarbor Status",
+		"apiKeyInput",
+		"Authorization",
 		"/healthz",
 		"/metrics",
 		"/v1/fleet/rank",

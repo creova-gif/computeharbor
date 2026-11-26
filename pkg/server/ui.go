@@ -1,0 +1,441 @@
+package server
+
+import "net/http"
+
+func (s *Server) handleUI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(uiHTML))
+}
+
+const uiHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ComputeHarbor Status &amp; Spot Savings Console</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-alt: #0b1220;
+    --border: #334155;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  h1 { margin: 0; font-size: 1.35rem; font-weight: 600; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.875rem; margin-top: 2px; }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+  label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+  input[type="text"] {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 11px;
+    font-size: 0.875rem;
+    min-width: 160px;
+  }
+  input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    background: var(--accent);
+    color: #082f49;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .badge.ok { color: var(--green); border-color: rgba(34, 197, 94, 0.4); }
+  .badge.err { color: var(--red); border-color: rgba(239, 68, 68, 0.4); }
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .kpi-label { font-size: 0.78rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .kpi-value { font-size: 1.65rem; font-weight: 700; margin-top: 6px; }
+  .kpi-sub { font-size: 0.8rem; color: var(--muted); margin-top: 4px; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 20px;
+    overflow: hidden;
+  }
+  .panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .panel-title { font-size: 0.98rem; font-weight: 600; margin: 0; }
+  .panel-meta { font-size: 0.78rem; color: var(--muted); }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; background: var(--surface-alt); }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .status-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+  }
+  .status-running, .status-completed { color: var(--green); }
+  .status-preempted, .status-pending { color: var(--amber); }
+  .status-failed, .status-cancelled { color: var(--red); }
+  pre.metrics {
+    margin: 0;
+    padding: 16px 18px;
+    background: var(--surface-alt);
+    color: #cbd5e1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.78rem;
+    overflow-x: auto;
+    max-height: 320px;
+  }
+  .empty { padding: 20px 18px; color: var(--muted); font-size: 0.875rem; }
+  .error-text { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>ComputeHarbor Status &amp; Spot Savings Console</h1>
+      <div class="subtitle">Control plane health, regional spot fleet rankings, jobs, and org savings</div>
+    </div>
+    <div class="controls">
+      <span id="health-badge" class="badge">Checking...</span>
+      <label for="org-id">X-Org-ID</label>
+      <input id="org-id" type="text" value="org-demo" autocomplete="off">
+      <button id="refresh-btn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <section class="kpi-grid">
+    <div class="card">
+      <div class="kpi-label">Net Spot Savings</div>
+      <div id="kpi-savings" class="kpi-value">--</div>
+      <div id="kpi-savings-sub" class="kpi-sub">Waiting for billing summary</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Est. Spot vs On-Demand</div>
+      <div id="kpi-spend" class="kpi-value">--</div>
+      <div id="kpi-spend-sub" class="kpi-sub">--</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Organization Jobs</div>
+      <div id="kpi-jobs" class="kpi-value">--</div>
+      <div id="kpi-jobs-sub" class="kpi-sub">--</div>
+    </div>
+    <div class="card">
+      <div class="kpi-label">Top Spot Pool (24GB+ VRAM)</div>
+      <div id="kpi-top-pool" class="kpi-value">--</div>
+      <div id="kpi-top-pool-sub" class="kpi-sub">--</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2 class="panel-title">Spot Fleet Rankings (min_vram=24)</h2>
+      <span id="fleet-meta" class="panel-meta">/v1/fleet/rank?min_vram=24</span>
+    </div>
+    <div id="fleet-body" class="table-wrap"><div class="empty">Loading fleet rankings...</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2 class="panel-title">Organization Jobs</h2>
+      <span id="jobs-meta" class="panel-meta">/v1/jobs</span>
+    </div>
+    <div id="jobs-body" class="table-wrap"><div class="empty">Loading jobs...</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2 class="panel-title">Control Plane Metrics</h2>
+      <span id="metrics-meta" class="panel-meta">/metrics</span>
+    </div>
+    <pre id="metrics-body" class="metrics">Loading metrics...</pre>
+  </section>
+</div>
+
+<script>
+(function () {
+  var orgInput = document.getElementById("org-id");
+  var refreshBtn = document.getElementById("refresh-btn");
+  var healthBadge = document.getElementById("health-badge");
+
+  function usd(v) {
+    return "$" + Number(v || 0).toFixed(2);
+  }
+  function pct(v) {
+    return (Number(v || 0) * 100).toFixed(1) + "%";
+  }
+  function clearAndMsg(el, text, isErr) {
+    el.textContent = "";
+    var d = document.createElement("div");
+    d.className = isErr ? "empty error-text" : "empty";
+    d.textContent = text;
+    el.appendChild(d);
+  }
+  function buildTable(headers, rows, numericCols) {
+    var table = document.createElement("table");
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    headers.forEach(function (h, i) {
+      var th = document.createElement("th");
+      th.textContent = h;
+      if (numericCols[i]) th.className = "num";
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+
+    var tbody = document.createElement("tbody");
+    rows.forEach(function (cells) {
+      var tr = document.createElement("tr");
+      cells.forEach(function (cell, i) {
+        var td = document.createElement("td");
+        if (numericCols[i]) td.className = "num";
+        if (cell && cell.nodeType) {
+          td.appendChild(cell);
+        } else {
+          td.textContent = String(cell);
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  async function fetchHealth() {
+    try {
+      var res = await fetch("/healthz");
+      var data = await res.json();
+      if (res.ok && data.status === "ok") {
+        healthBadge.textContent = "Health: OK";
+        healthBadge.className = "badge ok";
+      } else {
+        healthBadge.textContent = "Health: Degraded";
+        healthBadge.className = "badge err";
+      }
+    } catch (err) {
+      healthBadge.textContent = "Health: Unreachable";
+      healthBadge.className = "badge err";
+    }
+  }
+
+  async function fetchBilling(orgId) {
+    var savingsEl = document.getElementById("kpi-savings");
+    var savingsSub = document.getElementById("kpi-savings-sub");
+    var spendEl = document.getElementById("kpi-spend");
+    var spendSub = document.getElementById("kpi-spend-sub");
+    try {
+      var res = await fetch("/v1/billing/summary", { headers: { "X-Org-ID": orgId } });
+      var data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || ("HTTP " + res.status));
+      }
+      savingsEl.textContent = usd(data.net_savings_usd);
+      savingsSub.textContent = pct(data.net_savings_fraction) + " net savings (" + usd(data.platform_fee_usd) + " fee)";
+      spendEl.textContent = usd(data.estimated_spot_usd);
+      spendSub.textContent = "vs " + usd(data.estimated_on_demand_usd) + " on-demand";
+      document.getElementById("kpi-jobs").textContent = String(data.total_jobs || 0);
+      document.getElementById("kpi-jobs-sub").textContent =
+        (data.completed_jobs || 0) + " completed · " + (data.total_steps || 0) + " steps · " + (data.total_preemptions || 0) + " preemptions";
+    } catch (err) {
+      savingsEl.textContent = "--";
+      savingsSub.textContent = "Error: " + err.message;
+      spendEl.textContent = "--";
+      spendSub.textContent = "--";
+    }
+  }
+
+  async function fetchFleet() {
+    var container = document.getElementById("fleet-body");
+    var topPool = document.getElementById("kpi-top-pool");
+    var topPoolSub = document.getElementById("kpi-top-pool-sub");
+    try {
+      var res = await fetch("/v1/fleet/rank?min_vram=24");
+      var data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || ("HTTP " + res.status));
+      }
+      if (!Array.isArray(data) || data.length === 0) {
+        topPool.textContent = "None";
+        topPoolSub.textContent = "No matching pools";
+        clearAndMsg(container, "No fleet pools matched min_vram=24.", false);
+        return;
+      }
+      var best = data[0];
+      topPool.textContent = best.pool.gpu + " (" + best.pool.provider + ")";
+      topPoolSub.textContent = best.pool.region + " · " + usd(best.effective_hourly_usd) + "/hr · " + pct(best.net_savings_fraction) + " saved";
+
+      var rows = data.map(function (item) {
+        var p = item.pool;
+        return [
+          p.gpu,
+          p.provider,
+          p.region,
+          p.vram_gb + " GB",
+          usd(p.spot_hourly_usd),
+          usd(p.on_demand_hourly_usd),
+          usd(item.effective_hourly_usd),
+          pct(item.net_savings_fraction),
+          pct(p.availability_score),
+          Number(item.composite_score || 0).toFixed(3)
+        ];
+      });
+      container.textContent = "";
+      container.appendChild(buildTable(
+        ["GPU", "Provider", "Region", "VRAM", "Spot/hr", "On-Demand/hr", "Effective/hr", "Net Savings", "Availability", "Score"],
+        rows,
+        [false, false, false, true, true, true, true, true, true, true]
+      ));
+    } catch (err) {
+      topPool.textContent = "--";
+      topPoolSub.textContent = "Error: " + err.message;
+      clearAndMsg(container, "Failed to load fleet rankings: " + err.message, true);
+    }
+  }
+
+  async function fetchJobs(orgId) {
+    var container = document.getElementById("jobs-body");
+    try {
+      var res = await fetch("/v1/jobs", { headers: { "X-Org-ID": orgId } });
+      var data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || ("HTTP " + res.status));
+      }
+      if (!Array.isArray(data) || data.length === 0) {
+        clearAndMsg(container, "No jobs found for organization " + orgId + ".", false);
+        return;
+      }
+      var rows = data.map(function (job) {
+        var pill = document.createElement("span");
+        pill.className = "status-pill status-" + String(job.status || "").toLowerCase();
+        pill.textContent = job.status || "unknown";
+        return [
+          job.job_id,
+          job.gpu,
+          pill,
+          job.worker_node_id || "-",
+          (job.current_step || 0) + " / " + (job.target_steps || 0),
+          (job.preemption_count || 0) + " / " + (job.max_preemptions || 0),
+          job.last_recovery_dur_ms ? (job.last_recovery_dur_ms + " ms") : "-",
+          job.updated_at ? new Date(job.updated_at).toLocaleString() : "-"
+        ];
+      });
+      container.textContent = "";
+      container.appendChild(buildTable(
+        ["Job ID", "GPU", "Status", "Worker", "Progress", "Preemptions", "Last Recovery", "Updated"],
+        rows,
+        [false, false, false, false, true, true, true, false]
+      ));
+    } catch (err) {
+      clearAndMsg(container, "Failed to load jobs: " + err.message, true);
+    }
+  }
+
+  async function fetchMetrics() {
+    var pre = document.getElementById("metrics-body");
+    try {
+      var res = await fetch("/metrics");
+      var text = await res.text();
+      if (!res.ok) {
+        throw new Error("HTTP " + res.status);
+      }
+      pre.textContent = text;
+    } catch (err) {
+      pre.textContent = "Failed to load /metrics: " + err.message;
+    }
+  }
+
+  async function refreshAll() {
+    var orgId = (orgInput.value || "").trim() || "org-demo";
+    orgInput.value = orgId;
+    refreshBtn.disabled = true;
+    try {
+      await Promise.all([
+        fetchHealth(),
+        fetchBilling(orgId),
+        fetchFleet(),
+        fetchJobs(orgId),
+        fetchMetrics()
+      ]);
+    } finally {
+      refreshBtn.disabled = false;
+    }
+  }
+
+  refreshBtn.addEventListener("click", refreshAll);
+  orgInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") refreshAll();
+  });
+  refreshAll();
+})();
+</script>
+</body>
+</html>
+`

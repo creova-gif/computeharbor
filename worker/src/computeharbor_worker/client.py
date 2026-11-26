@@ -101,6 +101,14 @@ class ControlPlaneClient:
             payload={"worker_node_id": worker_node_id},
         )
 
+    def heartbeat(self, job_id: str, worker_node_id: str) -> dict[str, Any]:
+        """Report a worker heartbeat for an active job lease."""
+        return self._request(
+            "POST",
+            f"/v1/jobs/{job_id}/heartbeat",
+            payload={"worker_node_id": worker_node_id},
+        )
+
     def notify_sigterm(self, job_id: str) -> dict[str, Any]:
         """Notify the control plane that the active worker received SIGTERM."""
         return self._request("POST", f"/v1/jobs/{job_id}/sigterm")

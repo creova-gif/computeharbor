@@ -10,7 +10,7 @@ ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptib
 - [`pkg/orchestrator/coordinator.go`](pkg/orchestrator/coordinator.go): Thread-safe job lease state machine (`QUEUED` -> `RUNNING` -> `CHECKPOINTING` -> `MIGRATING` -> `COMPLETED`) with idempotent `SIGTERM` handling and step-regression guards.
 - [`worker/src/computeharbor_worker/`](worker/src/computeharbor_worker/): Python 3.12+ worker that intercepts `SIGTERM`, syncs CUDA when available, writes LoRA weights and AdamW state to a temporary Safetensors file, calls `os.fsync`, atomically swaps `latest.json`, optionally replicates to an object-store mirror (`--remote-store-dir`), and verifies SHA-256 integrity on restore.
 - [`tests/chaos/test_sigterm_preemption.py`](tests/chaos/test_sigterm_preemption.py): Subprocess chaos harness that injects three OS `SIGTERM` signals into a live training run and checks bit-for-bit loss and weight parity against an uninterrupted baseline.
-- [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md) and [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md): Architecture Decision Records for streaming LoRA + RNG checkpoints and the stdlib HTTP control-plane API.
+- [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md), [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md), and [`docs/adr/003-prometheus-observability.md`](docs/adr/003-prometheus-observability.md): Architecture Decision Records for streaming LoRA + RNG checkpoints, the stdlib HTTP control-plane API, and zero-dependency Prometheus observability.
 
 ## Measured benchmarks
 
@@ -37,6 +37,46 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 | `nvidia-a100-80gb` | AWS (`us-west-2`) | \$470.40 | \$136.40 | \$40.08 | \$176.48 | 71.00% | 62.48% |
 | `nvidia-h100-80gb` | GCP (`us-east4`) | \$825.60 | \$247.82 | \$69.33 | \$317.15 | 69.98% | 61.59% |
 
+## HTTP Control Plane API
+
+Start the control plane with `go run ./control-plane/cmd/computeharbor serve -addr :8080` (supports `-reap-interval` and `-lease-ttl`). Tenant-scoped job endpoints require the `X-Org-ID` request header (except `POST /v1/jobs`, which reads `org_id` from the JSON body).
+
+| Method & Path | Auth / Headers | Request / Query | Response |
+| --- | --- | --- | --- |
+| `GET /healthz` | None | — | `200 OK` `{"status":"ok"}` |
+| `GET /metrics` | None | — | `200 OK` Prometheus `0.0.4` text metrics ([ADR-003](docs/adr/003-prometheus-observability.md)) |
+| `POST /v1/jobs` | `Content-Type: application/json` | `job_id`, `org_id`, `gpu`, `target_steps`, `max_preemptions` | `201 Created` `JobLease` |
+| `GET /v1/jobs` | `X-Org-ID` | — | `200 OK` array of org-scoped `JobLease` objects |
+| `GET /v1/jobs/{id}` | `X-Org-ID` | — | `200 OK` `JobLease` |
+| `POST /v1/jobs/{id}/assign` | `X-Org-ID` | `{"worker_node_id": "..."}` | `200 OK` `JobLease` (`RUNNING`) |
+| `POST /v1/jobs/{id}/heartbeat` | `X-Org-ID` | `{"worker_node_id": "..."}` | `200 OK` `JobLease` with updated `last_heartbeat_at` |
+| `POST /v1/jobs/{id}/sigterm` | `X-Org-ID` | — | `200 OK` `JobLease` (`CHECKPOINTING`, idempotent) |
+| `POST /v1/jobs/{id}/checkpoint` | `X-Org-ID` | `step`, `epoch`, `loss`, `safetensors_uri`, `manifest_uri`, `flush_latency_ms` | `200 OK` `JobLease` (`MIGRATING` or `COMPLETED`) |
+| `GET /v1/cost/rank` | None | `min_vram`, `count`, `hours`, `fee` | `200 OK` ranked spot GPU pool quotes |
+
+## Spot Worker Daemon
+
+`computeharbor_worker.daemon` assigns a worker lease, streams periodic heartbeats, runs LoRA training with `SIGTERM` checkpoint interception, and commits the final or preempted checkpoint back to the control plane:
+
+```bash
+PYTHONPATH=worker/src .venv/bin/python -m computeharbor_worker.daemon \
+  --control-plane-url http://127.0.0.1:8080 \
+  --org-id org-demo \
+  --job-id job-001 \
+  --worker-node-id worker-gpu-1 \
+  --checkpoint-dir /tmp/computeharbor-ckpt \
+  --target-steps 30 \
+  --heartbeat-interval-sec 0.5
+```
+
+Optional flags: `--step-delay-sec`, `--ready-file`, `--summary-out`, and `--remote-store-dir`.
+
+Run the end-to-end Go control-plane + Python worker daemon tests (including `SIGTERM` preemption recovery):
+
+```bash
+make test-e2e
+```
+
 ## Reproduce all checks
 
 ```bash
@@ -57,4 +97,4 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 
 ## Standards
 
-See [`AGENTS.md`](AGENTS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md), [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+See [`AGENTS.md`](AGENTS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), [`docs/adr/001-lora-streaming-checkpoints.md`](docs/adr/001-lora-streaming-checkpoints.md), [`docs/adr/002-control-plane-http-api.md`](docs/adr/002-control-plane-http-api.md), [`docs/adr/003-prometheus-observability.md`](docs/adr/003-prometheus-observability.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).

@@ -2,10 +2,12 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -446,5 +448,132 @@ func TestHeartbeatEndpoint(t *testing.T) {
 	lease := decodeLease(t, rec)
 	if lease.LastHeartbeatAt == nil || !lease.LastHeartbeatAt.Equal(now) {
 		t.Fatalf("last_heartbeat_at = %v, want %v", lease.LastHeartbeatAt, now)
+	}
+}
+
+func TestListJobsTenantIsolation(t *testing.T) {
+	srv := server.New(orchestrator.NewCoordinator())
+
+	// Missing X-Org-ID -> 403
+	rec := doJSON(t, srv, http.MethodGet, "/v1/jobs", "", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /v1/jobs without X-Org-ID = %d, want 403", rec.Code)
+	}
+
+	// Empty org -> 200 with JSON array []
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs", "org-empty", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs empty org = %d, want 200", rec.Code)
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("GET /v1/jobs empty org body = %q, want []", rec.Body.String())
+	}
+
+	jobs := []struct {
+		id  string
+		org string
+	}{
+		{"job-2", "org-alpha"},
+		{"job-3", "org-beta"},
+		{"job-1", "org-alpha"},
+	}
+	for _, j := range jobs {
+		rec = doJSON(t, srv, http.MethodPost, "/v1/jobs", "", map[string]any{
+			"job_id":          j.id,
+			"org_id":          j.org,
+			"gpu":             string(cost.GPUL4),
+			"target_steps":    10,
+			"max_preemptions": 1,
+		})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("submit %s = %d, want 201", j.id, rec.Code)
+		}
+	}
+
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs org-alpha = %d, want 200", rec.Code)
+	}
+	var alphaJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &alphaJobs); err != nil {
+		t.Fatalf("decode org-alpha jobs: %v", err)
+	}
+	if len(alphaJobs) != 2 || alphaJobs[0].JobID != "job-1" || alphaJobs[1].JobID != "job-2" {
+		t.Fatalf("org-alpha jobs = %+v, want [job-1, job-2]", alphaJobs)
+	}
+
+	rec = doJSON(t, srv, http.MethodGet, "/v1/jobs", "org-beta", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/jobs org-beta = %d, want 200", rec.Code)
+	}
+	var betaJobs []leaseDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &betaJobs); err != nil {
+		t.Fatalf("decode org-beta jobs: %v", err)
+	}
+	if len(betaJobs) != 1 || betaJobs[0].JobID != "job-3" {
+		t.Fatalf("org-beta jobs = %+v, want [job-3]", betaJobs)
+	}
+}
+
+func TestStartReaperAndCancellation(t *testing.T) {
+	var clockNano atomic.Int64
+	base := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	clockNano.Store(base.UnixNano())
+
+	coord := orchestrator.NewCoordinator().WithClock(func() time.Time {
+		return time.Unix(0, clockNano.Load()).UTC()
+	})
+	srv := server.New(coord)
+
+	// Non-positive interval or ttl closes done immediately.
+	select {
+	case <-srv.StartReaper(context.Background(), 0, time.Second):
+	case <-time.After(time.Second):
+		t.Fatal("StartReaper with interval=0 did not close done immediately")
+	}
+	select {
+	case <-srv.StartReaper(context.Background(), time.Second, 0):
+	case <-time.After(time.Second):
+		t.Fatal("StartReaper with ttl=0 did not close done immediately")
+	}
+
+	if _, err := coord.SubmitJob("job-reap", "org-alpha", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-reap", "node-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance clock past TTL before starting reaper so first tick reaps deterministically.
+	clockNano.Store(base.Add(60 * time.Second).UnixNano())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := srv.StartReaper(ctx, 5*time.Millisecond, 30*time.Second)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		lease, err := coord.GetJob("job-reap")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.Status == orchestrator.StatusMigrating {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	lease, err := coord.GetJob("job-reap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Status != orchestrator.StatusMigrating {
+		t.Fatalf("job-reap status = %s, want %s", lease.Status, orchestrator.StatusMigrating)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartReaper did not exit after context cancellation")
 	}
 }

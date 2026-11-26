@@ -259,3 +259,51 @@ func TestReapStaleLeasesAndMaxPreemptions(t *testing.T) {
 		t.Fatalf("max-preemption WorkerNodeID = %q, want empty", reaped[0].WorkerNodeID)
 	}
 }
+
+func TestListJobs(t *testing.T) {
+	coord := NewCoordinator()
+
+	if got := coord.ListJobs("org-empty"); len(got) != 0 {
+		t.Fatalf("ListJobs(org-empty) = %d, want 0", len(got))
+	}
+
+	if _, err := coord.SubmitJob("job-b", "org-a", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.SubmitJob("job-a", "org-a", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.SubmitJob("job-c", "org-b", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := coord.AssignWorker("job-a", "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.CommitCheckpoint("job-a", CheckpointRef{Step: 3}); err != nil {
+		t.Fatal(err)
+	}
+
+	gotA := coord.ListJobs("org-a")
+	if len(gotA) != 2 {
+		t.Fatalf("len(ListJobs(org-a)) = %d, want 2", len(gotA))
+	}
+	if gotA[0].JobID != "job-a" || gotA[1].JobID != "job-b" {
+		t.Fatalf("ListJobs(org-a) order = [%s, %s], want [job-a, job-b]", gotA[0].JobID, gotA[1].JobID)
+	}
+
+	// Returned leases must be clones isolated from coordinator state.
+	gotA[0].LatestCheckpoint.Step = 999
+	fresh, err := coord.GetJob("job-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.LatestCheckpoint.Step != 3 {
+		t.Fatalf("mutating ListJobs result mutated coordinator state: got step %d, want 3", fresh.LatestCheckpoint.Step)
+	}
+
+	gotB := coord.ListJobs("org-b")
+	if len(gotB) != 1 || gotB[0].JobID != "job-c" {
+		t.Fatalf("ListJobs(org-b) = %+v, want [job-c]", gotB)
+	}
+}

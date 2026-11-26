@@ -60,7 +60,7 @@ func TestServeListenerHealthzAndShutdown(t *testing.T) {
 	var buf bytes.Buffer
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- serveListener(ctx, ln, &buf)
+		errCh <- serveListener(ctx, ln, &buf, 5*time.Second, 30*time.Second)
 	}()
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -79,5 +79,15 @@ func TestServeListenerHealthzAndShutdown(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), addr) {
 		t.Errorf("expected listen log to contain %q, got %q", addr, buf.String())
+	}
+}
+
+func TestRunServeReaperFlagsAndShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	if err := runServe(ctx, []string{"-addr", "127.0.0.1:0", "-reap-interval", "10ms", "-lease-ttl", "50ms"}, &buf); err != nil {
+		t.Fatalf("runServe with reaper flags failed: %v", err)
 	}
 }

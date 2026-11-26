@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +42,35 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// StartReaper runs ReapStaleLeases(ttl) on a ticker every interval until ctx is
+// cancelled, closing the returned channel once the loop exits.
+func (s *Server) StartReaper(ctx context.Context, interval, ttl time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	if interval <= 0 || ttl <= 0 {
+		close(done)
+		return done
+	}
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.coord.ReapStaleLeases(ttl)
+			}
+		}
+	}()
+	return done
+}
+
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /v1/jobs", s.handleListJobs)
 	s.mux.HandleFunc("POST /v1/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("GET /v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/assign", s.handleAssignWorker)
@@ -149,6 +177,21 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, toJobLeaseResponse(lease))
+}
+
+func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	orgID := strings.TrimSpace(r.Header.Get("X-Org-ID"))
+	if orgID == "" {
+		writeError(w, http.StatusForbidden, "X-Org-ID header is required")
+		return
+	}
+
+	leases := s.coord.ListJobs(orgID)
+	resp := make([]jobLeaseResponse, 0, len(leases))
+	for _, lease := range leases {
+		resp = append(resp, toJobLeaseResponse(lease))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {

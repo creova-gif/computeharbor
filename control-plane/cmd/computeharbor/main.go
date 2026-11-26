@@ -74,6 +74,8 @@ func run(args []string, out io.Writer) error {
 func runServe(ctx context.Context, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("computeharbor serve", flag.ContinueOnError)
 	addr := fs.String("addr", ":8080", "HTTP listen address")
+	reapInterval := fs.Duration("reap-interval", 5*time.Second, "Background stale-lease reaper interval")
+	leaseTTL := fs.Duration("lease-ttl", 30*time.Second, "Worker heartbeat lease TTL before preemption")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -82,12 +84,17 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return serveListener(ctx, ln, out)
+	return serveListener(ctx, ln, out, *reapInterval, *leaseTTL)
 }
 
-func serveListener(ctx context.Context, ln net.Listener, out io.Writer) error {
+func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInterval, leaseTTL time.Duration) error {
+	api := server.New(orchestrator.NewCoordinator())
+	reaperCtx, cancelReaper := context.WithCancel(ctx)
+	defer cancelReaper()
+	reaperDone := api.StartReaper(reaperCtx, reapInterval, leaseTTL)
+
 	srv := &http.Server{
-		Handler:           server.New(orchestrator.NewCoordinator()),
+		Handler:           api,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -100,6 +107,8 @@ func serveListener(ctx context.Context, ln net.Listener, out io.Writer) error {
 
 	select {
 	case err := <-errCh:
+		cancelReaper()
+		<-reaperDone
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -108,9 +117,13 @@ func serveListener(ctx context.Context, ln net.Listener, out io.Writer) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
+			cancelReaper()
+			<-reaperDone
 			return err
 		}
 		err := <-errCh
+		cancelReaper()
+		<-reaperDone
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}

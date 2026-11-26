@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -245,6 +246,23 @@ func (c *Coordinator) GetJob(jobID string) (JobLease, error) {
 		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
 	}
 	return cloneLease(job), nil
+}
+
+// ListJobs returns cloned leases belonging to orgID sorted by JobID.
+func (c *Coordinator) ListJobs(orgID string) []JobLease {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var out []JobLease
+	for _, job := range c.jobs {
+		if job.OrgID == orgID {
+			out = append(out, cloneLease(job))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].JobID < out[j].JobID
+	})
+	return out
 }
 
 func cloneLease(src *JobLease) JobLease {

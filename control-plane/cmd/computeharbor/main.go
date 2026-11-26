@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
+	"github.com/creova-gif/computeharbor/pkg/events"
 	"github.com/creova-gif/computeharbor/pkg/orchestrator"
 	"github.com/creova-gif/computeharbor/pkg/server"
 )
@@ -79,6 +80,8 @@ type serveConfig struct {
 	rateLimitRPS   float64
 	rateLimitBurst int
 	logJSON        bool
+	webhookURL     string
+	webhookSecret  string
 }
 
 func runServe(ctx context.Context, args []string, out io.Writer) error {
@@ -90,6 +93,8 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	rateLimitRPS := fs.Float64("rate-limit-rps", 0, "Per-org HTTP rate limit in requests per second (<= 0 disables)")
 	rateLimitBurst := fs.Int("rate-limit-burst", 20, "Per-org HTTP rate limit burst size")
 	logJSON := fs.Bool("log-json", true, "Emit structured JSON HTTP request logs to stderr")
+	webhookURL := fs.String("webhook-url", "", "Optional HTTP endpoint to receive signed lifecycle webhook events")
+	webhookSecret := fs.String("webhook-secret", "", "HMAC-SHA256 secret used to sign webhook payloads")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -105,6 +110,8 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 		rateLimitRPS:   *rateLimitRPS,
 		rateLimitBurst: *rateLimitBurst,
 		logJSON:        *logJSON,
+		webhookURL:     *webhookURL,
+		webhookSecret:  *webhookSecret,
 	})
 }
 
@@ -124,6 +131,11 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 		if err != nil {
 			return fmt.Errorf("load coordinator state: %w", err)
 		}
+	}
+	if cfg.webhookURL != "" {
+		dispatcher := events.NewWebhookDispatcher(cfg.webhookURL, cfg.webhookSecret, 256)
+		coord.WithEventSink(dispatcher)
+		defer dispatcher.Close()
 	}
 
 	api := server.New(coord)

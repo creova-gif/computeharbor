@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -179,5 +180,57 @@ func TestWebhookDispatcherGracefulClose(t *testing.T) {
 	}
 	if d.DroppedCount() != 1 {
 		t.Fatalf("DroppedCount() = %d, want 1 (post-close emit)", d.DroppedCount())
+	}
+}
+
+func TestWebhookDispatcherRetryAndCounters(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch attempts.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case 2:
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher(srv.URL, "secret", 8).WithRetry(2, 5*time.Millisecond)
+	d.Emit(Event{ID: "evt-retry", Type: EventJobCompleted, JobID: "job-1"})
+	d.Close()
+
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+	if d.DeliveredCount() != 1 {
+		t.Fatalf("DeliveredCount() = %d, want 1", d.DeliveredCount())
+	}
+	if d.FailedCount() != 0 {
+		t.Fatalf("FailedCount() = %d, want 0", d.FailedCount())
+	}
+}
+
+func TestWebhookDispatcherPermanentFailureCounter(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	d := NewWebhookDispatcher(srv.URL, "secret", 8).WithRetry(2, 5*time.Millisecond)
+	d.Emit(Event{ID: "evt-perm-fail", Type: EventJobFailed, JobID: "job-2"})
+	d.Close()
+
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want 1 (400 must not be retried)", got)
+	}
+	if d.DeliveredCount() != 0 {
+		t.Fatalf("DeliveredCount() = %d, want 0", d.DeliveredCount())
+	}
+	if d.FailedCount() != 1 {
+		t.Fatalf("FailedCount() = %d, want 1", d.FailedCount())
 	}
 }

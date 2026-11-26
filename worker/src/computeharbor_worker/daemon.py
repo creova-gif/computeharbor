@@ -46,8 +46,11 @@ def run_worker_daemon(
     metadata_url: str | None = None,
     metadata_poll_sec: float = 0.5,
     max_checkpoints: int = 5,
+    api_key: str | None = None,
 ) -> RunResult:
     """Assign this worker to a job, stream heartbeats, train, and commit checkpoints."""
+    if api_key is not None:
+        client.api_key = api_key
     ckpt_dir = Path(checkpoint_dir)
     client.assign_worker(job_id, worker_node_id)
 
@@ -129,12 +132,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata-url", default=None)
     parser.add_argument("--metadata-poll-sec", type=float, default=0.5)
     parser.add_argument("--max-checkpoints", type=int, default=5)
+    parser.add_argument("--api-key", default=None)
     args = parser.parse_args(argv)
 
     remote_store: CheckpointStore | None = (
         LocalMirrorObjectStore(Path(args.remote_store_dir)) if args.remote_store_dir else None
     )
-    client = ControlPlaneClient(base_url=args.control_plane_url, org_id=args.org_id)
+    client = ControlPlaneClient(
+        base_url=args.control_plane_url,
+        org_id=args.org_id,
+        api_key=args.api_key,
+    )
     ready_path = Path(args.ready_file) if args.ready_file else None
     result = run_worker_daemon(
         client=client,

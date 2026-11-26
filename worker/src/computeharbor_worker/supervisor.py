@@ -44,10 +44,13 @@ def run_job_with_failover(
     remote_store: CheckpointStore | None = None,
     config: LoRAConfig | None = None,
     worker_runner: WorkerRunner | None = None,
+    api_key: str | None = None,
 ) -> FailoverResult:
     """Run a job across spot preemptions until completion or failure."""
     if max_preemptions < 0:
         raise ValueError("max_preemptions must be >= 0")
+    if api_key is not None:
+        client.api_key = api_key
 
     if submit_job:
         client.submit_job(
@@ -121,12 +124,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--step-delay-sec", type=float, default=0.0)
     parser.add_argument("--remote-store-dir", default="")
     parser.add_argument("--summary-out", default="")
+    parser.add_argument("--api-key", default=None)
     args = parser.parse_args(argv)
 
     remote_store: CheckpointStore | None = (
         LocalMirrorObjectStore(Path(args.remote_store_dir)) if args.remote_store_dir else None
     )
-    client = ControlPlaneClient(base_url=args.control_plane_url, org_id=args.org_id)
+    client = ControlPlaneClient(
+        base_url=args.control_plane_url,
+        org_id=args.org_id,
+        api_key=args.api_key,
+    )
     result = run_job_with_failover(
         client=client,
         job_id=args.job_id,

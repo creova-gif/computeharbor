@@ -17,6 +17,7 @@ class _MockServerState:
     def __init__(self, responses: list[tuple[int, dict[str, Any], dict[str, str]]]) -> None:
         self.responses = list(responses)
         self.calls: int = 0
+        self.auth_headers: list[str | None] = []
         self.lock = threading.Lock()
 
 
@@ -36,6 +37,7 @@ def _mock_control_plane(state: _MockServerState) -> Iterator[str]:
             with state.lock:
                 idx = min(state.calls, len(state.responses) - 1)
                 status, body_obj, extra_headers = state.responses[idx]
+                state.auth_headers.append(self.headers.get("Authorization"))
                 state.calls += 1
 
             raw = json.dumps(body_obj).encode("utf-8")
@@ -170,3 +172,41 @@ def test_retries_url_error_with_exponential_backoff(monkeypatch: pytest.MonkeyPa
         client.healthz()
 
     assert sleep_calls == [0.05, 0.1, 0.2]
+
+
+def test_sends_bearer_auth_when_api_key_is_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COMPUTEHARBOR_API_KEY", raising=False)
+    state = _MockServerState([(200, {"status": "ok"}, {})])
+    with _mock_control_plane(state) as base_url:
+        client = ControlPlaneClient(
+            base_url=base_url,
+            org_id="org-test",
+            api_key="tok-explicit",
+        )
+        client.healthz()
+        client.get_job("job-1")
+
+    assert state.auth_headers == ["Bearer tok-explicit", "Bearer tok-explicit"]
+
+
+def test_sends_bearer_auth_from_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COMPUTEHARBOR_API_KEY", "tok-from-env")
+    state = _MockServerState([(200, {"status": "ok"}, {})])
+    with _mock_control_plane(state) as base_url:
+        client = ControlPlaneClient(base_url=base_url, org_id="org-test")
+        client.healthz()
+
+    assert state.auth_headers == ["Bearer tok-from-env"]
+
+
+def test_omits_bearer_auth_when_unset_or_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COMPUTEHARBOR_API_KEY", raising=False)
+    state = _MockServerState([(200, {"status": "ok"}, {})])
+    with _mock_control_plane(state) as base_url:
+        unset_client = ControlPlaneClient(base_url=base_url, org_id="org-test")
+        unset_client.healthz()
+
+        empty_client = ControlPlaneClient(base_url=base_url, org_id="org-test", api_key="")
+        empty_client.healthz()
+
+    assert state.auth_headers == [None, None]

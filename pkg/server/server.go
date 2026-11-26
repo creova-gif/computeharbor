@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,8 +20,10 @@ const maxBodyBytes = 1 << 20 // 1 MiB
 
 // Server exposes the ComputeHarbor control plane over HTTP/JSON.
 type Server struct {
-	coord *orchestrator.Coordinator
-	mux   *http.ServeMux
+	coord   *orchestrator.Coordinator
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	limiter *OrgRateLimiter
 }
 
 // New constructs a Server wrapping the provided Coordinator.
@@ -37,9 +40,28 @@ func New(coord *orchestrator.Coordinator) *Server {
 	return s
 }
 
+// WithLogger configures structured HTTP request logging on the Server.
+func (s *Server) WithLogger(logger *slog.Logger) *Server {
+	s.logger = logger
+	return s
+}
+
+// WithRateLimit configures per-org token-bucket rate limiting on the Server.
+func (s *Server) WithRateLimit(rps float64, burst int) *Server {
+	s.limiter = NewOrgRateLimiter(rps, burst)
+	return s
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	var handler http.Handler = s.mux
+	if s.limiter != nil {
+		handler = s.limiter.Middleware(handler)
+	}
+	if s.logger != nil {
+		handler = LoggingMiddleware(s.logger, handler)
+	}
+	handler.ServeHTTP(w, r)
 }
 
 // StartReaper runs ReapStaleLeases(ttl) on a ticker every interval until ctx is

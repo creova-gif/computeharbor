@@ -169,3 +169,23 @@ func TestSaveSnapshotCreatesNestedParentDir(t *testing.T) {
 		t.Fatalf("restored.GetJob(job-nested): %v", err)
 	}
 }
+
+func TestSaveSnapshotFilePermissions(t *testing.T) {
+	c := NewCoordinator()
+	if _, err := c.SubmitJob("job-perm", "org-secret", cost.GPUL4, 100, 1); err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	snapPath := filepath.Join(t.TempDir(), "coordinator-state.json")
+	if err := c.SaveSnapshot(snapPath); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+
+	info, err := os.Stat(snapPath)
+	if err != nil {
+		t.Fatalf("Stat snapshot: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("snapshot file mode = %04o, want 0600", got)
+	}
+}

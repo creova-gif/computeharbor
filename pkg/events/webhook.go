@@ -6,7 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,9 +77,14 @@ func NewWebhookDispatcher(endpoint, secret string, bufferSize int) *WebhookDispa
 		bufferSize = defaultBufSize
 	}
 	d := &WebhookDispatcher{
-		endpoint:    endpoint,
-		secret:      secret,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		endpoint: endpoint,
+		secret:   secret,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		maxRetries:  defaultMaxRetries,
 		backoffBase: defaultBackoff,
 		ch:          make(chan Event, bufferSize),
@@ -161,8 +169,35 @@ func (d *WebhookDispatcher) worker() {
 	}
 }
 
+// ValidateWebhookURL checks that rawURL is a well-formed HTTP or HTTPS URL
+// with a non-empty host and no embedded userinfo credentials.
+func ValidateWebhookURL(rawURL string) error {
+	if strings.TrimSpace(rawURL) == "" {
+		return errors.New("webhook URL cannot be empty")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported webhook URL scheme %q: must be http or https", u.Scheme)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return errors.New("webhook URL must include a host")
+	}
+	if u.User != nil {
+		return errors.New("webhook URL must not contain embedded userinfo")
+	}
+	return nil
+}
+
 func (d *WebhookDispatcher) deliver(evt Event) {
 	if d.endpoint == "" {
+		return
+	}
+	if err := ValidateWebhookURL(d.endpoint); err != nil {
+		d.failed.Add(1)
 		return
 	}
 

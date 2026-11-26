@@ -68,6 +68,10 @@ func (c *Coordinator) SaveSnapshot(path string) error {
 		}
 	}()
 
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod temp snapshot file: %w", err)
+	}
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("write temp snapshot file: %w", err)

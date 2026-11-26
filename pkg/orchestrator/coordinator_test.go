@@ -307,3 +307,59 @@ func TestListJobs(t *testing.T) {
 		t.Fatalf("ListJobs(org-b) = %+v, want [job-c]", gotB)
 	}
 }
+
+func TestCancelJob(t *testing.T) {
+	now := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+	coord := NewCoordinator().WithClock(func() time.Time { return now })
+
+	if _, err := coord.CancelJob("missing"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("CancelJob(missing) = %v, want ErrJobNotFound", err)
+	}
+
+	// Cancel from RUNNING clears WorkerNodeID and updates UpdatedAt.
+	if _, err := coord.SubmitJob("job-run", "org-1", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-run", "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(30 * time.Second)
+	cancelled, err := coord.CancelJob("job-run")
+	if err != nil {
+		t.Fatalf("CancelJob(RUNNING) failed: %v", err)
+	}
+	if cancelled.Status != StatusCancelled {
+		t.Fatalf("status = %s, want %s", cancelled.Status, StatusCancelled)
+	}
+	if cancelled.WorkerNodeID != "" {
+		t.Fatalf("WorkerNodeID = %q, want empty", cancelled.WorkerNodeID)
+	}
+	if !cancelled.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt = %v, want %v", cancelled.UpdatedAt, now)
+	}
+
+	// Idempotent double-cancel does not error or mutate UpdatedAt.
+	later := now.Add(time.Minute)
+	now = later
+	again, err := coord.CancelJob("job-run")
+	if err != nil {
+		t.Fatalf("idempotent CancelJob failed: %v", err)
+	}
+	if again.Status != StatusCancelled || !again.UpdatedAt.Equal(cancelled.UpdatedAt) {
+		t.Fatalf("idempotent CancelJob = %+v, want unchanged lease", again)
+	}
+
+	// COMPLETED cannot be cancelled.
+	if _, err := coord.SubmitJob("job-done", "org-1", cost.GPUL4, 5, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.AssignWorker("job-done", "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.CommitCheckpoint("job-done", CheckpointRef{Step: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coord.CancelJob("job-done"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("CancelJob(COMPLETED) = %v, want ErrInvalidTransition", err)
+	}
+}

@@ -161,7 +161,7 @@ def test_remote_migration_e2e_across_fresh_node_dirs(tmp_path: Path) -> None:
             node1_latest.read_text(encoding="utf-8")
         )
         assert node1_manifest.step == summary_1.completed_step
-        assert (mirror_dir / "latest.json").is_file()
+        assert (mirror_dir / job_id / "latest.json").is_file()
         assert (mirror_dir / job_id / node1_manifest.safetensors_filename).is_file()
 
         migrating_lease = client.get_job(job_id)

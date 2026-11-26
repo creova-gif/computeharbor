@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go 1.23+](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-v0.2.2-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.2.3-green.svg)](CHANGELOG.md)
 
 ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptible spot GPU pools. When a provider sends `SIGTERM` for a 30-second spot eviction, the worker flushes only the mutable LoRA adapter matrices, AdamW moment buffers, and PRNG state in Safetensors format via an atomic write-and-rename commit.
 
@@ -93,8 +93,11 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 - `-log-json`: Emit structured JSON HTTP request logs via `slog` to `stderr` (default `true`).
 - `-webhook-url` / `-webhook-secret`: Async HTTP endpoint and HMAC-SHA256 secret for signed lifecycle webhook delivery.
 - `-api-key`: Optional Bearer API key for HTTP authentication (defaults to `COMPUTEHARBOR_API_KEY`).
+- `-org-api-keys`: Optional comma-separated org-scoped Bearer API keys (`org=token,...`, defaults to `COMPUTEHARBOR_ORG_API_KEYS`) that bind tokens to `X-Org-ID` tenants ([`ADR-007`](docs/adr/007-scoped-org-api-keys.md)).
 
 ## Deployment & Observability
+
+See [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for production SRE operations, incident response, key rotation, and graceful draining procedures.
 
 Run the control plane and Prometheus locally with Docker Compose:
 
@@ -169,4 +172,4 @@ PYTHONPATH=worker/src .venv/bin/python tests/chaos/test_sigterm_preemption.py
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, test/lint requirements, and PR guidelines. Also see [`SECURITY.md`](SECURITY.md), [`AGENTS.md`](AGENTS.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, test/lint requirements, and PR guidelines. Also see [`SECURITY.md`](SECURITY.md), [`docs/RUNBOOK.md`](docs/RUNBOOK.md), [`AGENTS.md`](AGENTS.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).

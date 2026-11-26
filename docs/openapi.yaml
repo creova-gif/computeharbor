@@ -145,12 +145,37 @@ paths:
       operationId: listJobs
       parameters:
         - $ref: "#/components/parameters/OrgIDHeader"
+        - name: status
+          in: query
+          description: Optional job lifecycle status filter
+          schema:
+            type: string
+            enum: [QUEUED, RUNNING, CHECKPOINTING, MIGRATING, COMPLETED, FAILED]
+        - name: limit
+          in: query
+          description: Maximum number of jobs to return (0 returns all matching jobs)
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: offset
+          in: query
+          description: Number of matching jobs to skip before returning results
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         "200":
           description: List of job leases belonging to the organization
           headers:
             X-Request-ID:
               $ref: "#/components/headers/RequestID"
+            X-Total-Count:
+              description: Total number of matching jobs for the organization before limit/offset pagination
+              schema:
+                type: integer
+                minimum: 0
           content:
             application/json:
               schema:

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-26
+
+### Added
+- **Org-Scoped Bearer API Keys (`pkg/server`, `control-plane/`, `THREAT_MODEL.md`):** Added `-org-api-keys` flag and `COMPUTEHARBOR_ORG_API_KEYS` (`org=token,...`) support to bind Bearer tokens to specific `X-Org-ID` tenants and `POST /v1/jobs` `org_id` payloads (`#74`).
+- **Python Client Readiness & Request ID Tracking (`worker/`):** Added `ControlPlaneClient.readyz()` and `last_request_id` (`X-Request-ID`) tracking across HTTP control-plane calls (`#73`).
+- **SRE Operations Runbook & ADR-007 (`docs/RUNBOOK.md`, `docs/adr/007-scoped-org-api-keys.md`):** Added production operations runbook and architecture decision record for org-scoped API key enforcement (`#72`).
+- **Job Listing Filtering & Pagination (`pkg/server`, `docs/openapi.yaml`):** Documented `status`, `limit`, and `offset` query parameters and `X-Total-Count` response header on `GET /v1/jobs`.
+- **Worker Presigned Store Retries & Control-Plane RED Metrics (`worker/`, `pkg/server`):** Added transient HTTP retry backoff to `HTTPPresignedStore` (`#69`) and exported draining state plus HTTP RED metrics on `GET /metrics` (`#71`).
+
 ## [0.2.2] - 2026-11-26
 
 ### Added

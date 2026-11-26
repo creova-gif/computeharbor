@@ -14,7 +14,15 @@ import (
 
 func getMetrics(t *testing.T, srv http.Handler) string {
 	t.Helper()
+	return getMetricsWithAuth(t, srv, "")
+}
+
+func getMetricsWithAuth(t *testing.T, srv http.Handler, token string) string {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -156,4 +164,69 @@ func TestMetricsWebhookCounters(t *testing.T) {
 	assertMetricLine(t, withStats, "computeharbor_webhook_delivered_total 42")
 	assertMetricLine(t, withStats, "computeharbor_webhook_failed_total 3")
 	assertMetricLine(t, withStats, "computeharbor_webhook_dropped_total 7")
+}
+
+func TestMetricsDrainingAndHTTPRED(t *testing.T) {
+	const token = "secret-token"
+	srv := server.New(orchestrator.NewCoordinator()).WithAPIKey(token)
+
+	// Initially not draining and zero HTTP requests recorded.
+	initial := getMetricsWithAuth(t, srv, token)
+	assertMetricLine(t, initial, "computeharbor_draining 0")
+	assertMetricLine(t, initial, "computeharbor_http_request_duration_seconds_count 0")
+
+	// Flip draining state.
+	srv.SetDraining(true)
+	draining := getMetricsWithAuth(t, srv, token)
+	assertMetricLine(t, draining, "computeharbor_draining 1")
+
+	srv.SetDraining(false)
+	ready := getMetricsWithAuth(t, srv, token)
+	assertMetricLine(t, ready, "computeharbor_draining 0")
+
+	// 200 OK (healthz bypasses bearer auth).
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /healthz status = %d, want 200", rec.Code)
+		}
+	}
+
+	// 401 Unauthorized (missing bearer token).
+	req401 := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	rec401 := httptest.NewRecorder()
+	srv.ServeHTTP(rec401, req401)
+	if rec401.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /v1/jobs without auth status = %d, want 401", rec401.Code)
+	}
+
+	// 404 Not Found (with valid bearer token and org header).
+	req404 := httptest.NewRequest(http.MethodGet, "/v1/jobs/does-not-exist", nil)
+	req404.Header.Set("Authorization", "Bearer "+token)
+	req404.Header.Set("X-Org-ID", "org-alpha")
+	rec404 := httptest.NewRecorder()
+	srv.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("GET /v1/jobs/does-not-exist status = %d, want 404", rec404.Code)
+	}
+
+	// Scrape /metrics with valid bearer token.
+	reqMetrics := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	reqMetrics.Header.Set("Authorization", "Bearer secret-token")
+	recMetrics := httptest.NewRecorder()
+	srv.ServeHTTP(recMetrics, reqMetrics)
+	if recMetrics.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d, want 200", recMetrics.Code)
+	}
+	body := recMetrics.Body.String()
+
+	assertMetricLine(t, body, `computeharbor_http_requests_total{method="GET",status="200"} 2`)
+	assertMetricLine(t, body, `computeharbor_http_requests_total{method="GET",status="401"} 1`)
+	assertMetricLine(t, body, `computeharbor_http_requests_total{method="GET",status="404"} 1`)
+	assertMetricLine(t, body, "computeharbor_http_request_duration_seconds_count 4")
+	if !strings.Contains(body, "computeharbor_http_request_duration_seconds_sum ") {
+		t.Fatalf("missing computeharbor_http_request_duration_seconds_sum in:\n%s", body)
+	}
 }

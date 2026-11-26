@@ -36,6 +36,7 @@ type Server struct {
 	apiKey       string
 	webhookStats WebhookStats
 	draining     atomic.Bool
+	httpMetrics  *httpMetrics
 	barrierMu    sync.Mutex
 	barriers     map[string]*orchestrator.RingBarrier
 }
@@ -47,9 +48,10 @@ func New(coord *orchestrator.Coordinator) *Server {
 		coord = orchestrator.NewCoordinator()
 	}
 	s := &Server{
-		coord:    coord,
-		mux:      http.NewServeMux(),
-		barriers: make(map[string]*orchestrator.RingBarrier),
+		coord:       coord,
+		mux:         http.NewServeMux(),
+		httpMetrics: newHTTPMetrics(),
+		barriers:    make(map[string]*orchestrator.RingBarrier),
 	}
 	s.registerRoutes()
 	return s
@@ -102,9 +104,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.logger != nil {
 		handler = LoggingMiddleware(s.logger, handler)
 	}
+	handler = s.metricsMiddleware(handler)
 	handler = SecurityHeadersMiddleware(handler)
 	handler = RequestIDMiddleware(handler)
 	handler.ServeHTTP(w, r)
+}
+
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		start := time.Now()
+		rec := &statusRecorder{
+			ResponseWriter: w,
+			status:         http.StatusOK,
+		}
+		next.ServeHTTP(rec, r)
+		s.httpMetrics.record(r.Method, rec.status, time.Since(start))
+	})
 }
 
 // StartReaper runs ReapStaleLeases(ttl) on a ticker every interval until ctx is

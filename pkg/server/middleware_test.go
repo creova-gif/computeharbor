@@ -3,6 +3,7 @@ package server_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -193,5 +194,124 @@ func TestServerWithLoggerAndRateLimit(t *testing.T) {
 	}
 	if got := second["status"]; got != float64(http.StatusTooManyRequests) {
 		t.Fatalf("expected logged status 429, got %v", got)
+	}
+}
+
+func TestBearerAuthMiddleware(t *testing.T) {
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("empty apiKey is a no-op", func(t *testing.T) {
+		handler := server.BearerAuthMiddleware("", okHandler)
+		req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 when apiKey is empty, got %d", rec.Code)
+		}
+	})
+
+	authHandler := server.BearerAuthMiddleware("secret-token-123", okHandler)
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		authHeader string
+		wantStatus int
+	}{
+		{
+			name:       "missing authorization header",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "wrong bearer token",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer wrong-token",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "non-bearer scheme",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Basic secret-token-123",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "valid bearer token",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer secret-token-123",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "GET /healthz bypasses auth",
+			method:     http.MethodGet,
+			path:       "/healthz",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "GET /ui bypasses auth",
+			method:     http.MethodGet,
+			path:       "/ui",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "POST /healthz does not bypass auth",
+			method:     http.MethodPost,
+			path:       "/healthz",
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			rec := httptest.NewRecorder()
+			authHandler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d (body: %s)", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusUnauthorized {
+				var body map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("unmarshal 401 body: %v", err)
+				}
+				if body["error"] != "unauthorized" {
+					t.Fatalf("expected error=unauthorized, got %q", body["error"])
+				}
+			}
+		})
+	}
+}
+
+func TestOrgRateLimiterEviction(t *testing.T) {
+	limiter := server.NewOrgRateLimiter(0.0001, 1)
+
+	if !limiter.Allow("org-victim") {
+		t.Fatal("expected initial org-victim request to be allowed")
+	}
+	if limiter.Allow("org-victim") {
+		t.Fatal("expected second org-victim request to be rate-limited before eviction")
+	}
+
+	// Fill up to maxBuckets (10000) with distinct orgs so org-victim (oldest) is evicted.
+	for i := 0; i < 10000; i++ {
+		if !limiter.Allow(fmt.Sprintf("org-fill-%d", i)) {
+			t.Fatalf("expected org-fill-%d first request to be allowed", i)
+		}
+	}
+
+	// After eviction, org-victim gets a fresh bucket.
+	if !limiter.Allow("org-victim") {
+		t.Fatal("expected org-victim to be allowed after bucket eviction")
 	}
 }

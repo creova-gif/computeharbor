@@ -89,6 +89,7 @@ type serveConfig struct {
 	logJSON        bool
 	webhookURL     string
 	webhookSecret  string
+	apiKey         string
 }
 
 func runServe(ctx context.Context, args []string, out io.Writer) error {
@@ -102,6 +103,7 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	logJSON := fs.Bool("log-json", true, "Emit structured JSON HTTP request logs to stderr")
 	webhookURL := fs.String("webhook-url", "", "Optional HTTP endpoint to receive signed lifecycle webhook events")
 	webhookSecret := fs.String("webhook-secret", "", "HMAC-SHA256 secret used to sign webhook payloads")
+	apiKey := fs.String("api-key", os.Getenv("COMPUTEHARBOR_API_KEY"), "Optional Bearer API key for HTTP authentication")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -119,6 +121,7 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 		logJSON:        *logJSON,
 		webhookURL:     *webhookURL,
 		webhookSecret:  *webhookSecret,
+		apiKey:         *apiKey,
 	})
 }
 
@@ -152,13 +155,19 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 	if cfg.rateLimitRPS > 0 {
 		api.WithRateLimit(cfg.rateLimitRPS, cfg.rateLimitBurst)
 	}
+	if cfg.apiKey != "" {
+		api.WithAPIKey(cfg.apiKey)
+	}
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	defer cancelReaper()
 	reaperDone := api.StartReaper(reaperCtx, cfg.reapInterval, cfg.leaseTTL)
 
 	srv := &http.Server{
 		Handler:           api,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	fmt.Fprintf(out, "computeharbor control plane listening on %s\n", ln.Addr().String())

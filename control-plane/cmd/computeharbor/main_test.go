@@ -255,6 +255,101 @@ func TestRunServeRateLimitFlags(t *testing.T) {
 	}
 }
 
+func TestRunServeAPIKeyFlag(t *testing.T) {
+	pr, pw := io.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		errCh <- runServe(ctx, []string{
+			"-addr", "127.0.0.1:0",
+			"-api-key", "test-api-key",
+			"-log-json=false",
+		}, pw)
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	if !scanner.Scan() {
+		cancel()
+		<-errCh
+		t.Fatalf("expected listen line, scan err: %v", scanner.Err())
+	}
+	line := scanner.Text()
+	const prefix = "computeharbor control plane listening on "
+	if !strings.HasPrefix(line, prefix) {
+		cancel()
+		<-errCh
+		t.Fatalf("unexpected listen line %q", line)
+	}
+	addr := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+
+	go func() {
+		_, _ = io.Copy(io.Discard, pr)
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// /healthz bypasses Bearer auth.
+	healthResp, err := client.Get("http://" + addr + "/healthz")
+	if err != nil {
+		cancel()
+		<-errCh
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		cancel()
+		<-errCh
+		t.Fatalf("GET /healthz status = %d, want 200", healthResp.StatusCode)
+	}
+
+	// Missing token -> 401.
+	reqNoAuth, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/jobs", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	reqNoAuth.Header.Set("X-Org-ID", "org-auth")
+	respNoAuth, err := client.Do(reqNoAuth)
+	if err != nil {
+		cancel()
+		<-errCh
+		t.Fatalf("Do without auth: %v", err)
+	}
+	respNoAuth.Body.Close()
+	if respNoAuth.StatusCode != http.StatusUnauthorized {
+		cancel()
+		<-errCh
+		t.Fatalf("GET /v1/jobs without auth status = %d, want 401", respNoAuth.StatusCode)
+	}
+
+	// Valid Bearer token -> 200.
+	reqValid, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/jobs", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	reqValid.Header.Set("X-Org-ID", "org-auth")
+	reqValid.Header.Set("Authorization", "Bearer test-api-key")
+	respValid, err := client.Do(reqValid)
+	if err != nil {
+		cancel()
+		<-errCh
+		t.Fatalf("Do with valid auth: %v", err)
+	}
+	respValid.Body.Close()
+	if respValid.StatusCode != http.StatusOK {
+		cancel()
+		<-errCh
+		t.Fatalf("GET /v1/jobs with valid auth status = %d, want 200", respValid.StatusCode)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("runServe returned error: %v", err)
+	}
+}
+
 func TestRunServeWebhookDelivery(t *testing.T) {
 	type deliveredWebhook struct {
 		body []byte

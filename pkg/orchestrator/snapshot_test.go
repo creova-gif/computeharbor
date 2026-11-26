@@ -140,3 +140,32 @@ func TestLoadCoordinatorFromFileUnsupportedVersion(t *testing.T) {
 		t.Fatal("expected error for unsupported snapshot version, got nil")
 	}
 }
+
+func TestSaveSnapshotCreatesNestedParentDir(t *testing.T) {
+	c := NewCoordinator()
+	if _, err := c.SubmitJob("job-nested", "org-1", cost.GPUL4, 50, 1); err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	nestedDir := filepath.Join(t.TempDir(), "a", "b", "c")
+	snapPath := filepath.Join(nestedDir, "coordinator-state.json")
+	if err := c.SaveSnapshot(snapPath); err != nil {
+		t.Fatalf("SaveSnapshot nested: %v", err)
+	}
+
+	entries, err := os.ReadDir(nestedDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "coordinator-state.json" {
+		t.Fatalf("unexpected directory entries after SaveSnapshot: %+v", entries)
+	}
+
+	restored, err := LoadCoordinatorFromFile(snapPath)
+	if err != nil {
+		t.Fatalf("LoadCoordinatorFromFile: %v", err)
+	}
+	if _, err := restored.GetJob("job-nested"); err != nil {
+		t.Fatalf("restored.GetJob(job-nested): %v", err)
+	}
+}

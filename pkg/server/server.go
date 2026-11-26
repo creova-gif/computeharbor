@@ -114,6 +114,39 @@ func (s *Server) StartReaper(ctx context.Context, interval, ttl time.Duration) <
 	return done
 }
 
+// StartSnapshotter periodically persists coordinator state to path every interval
+// until ctx is cancelled, then flushes one final snapshot before closing done.
+func (s *Server) StartSnapshotter(ctx context.Context, path string, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	if path == "" || interval <= 0 {
+		close(done)
+		return done
+	}
+
+	save := func() {
+		if err := s.coord.SaveSnapshot(path); err != nil && s.logger != nil {
+			s.logger.Error("coordinator snapshot failed", "path", path, "error", err)
+		}
+	}
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				save()
+				return
+			case <-ticker.C:
+				save()
+			}
+		}
+	}()
+	return done
+}
+
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /ui", s.handleUI)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

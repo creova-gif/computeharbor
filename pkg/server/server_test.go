@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -650,5 +653,88 @@ func TestCancelJobEndpoint(t *testing.T) {
 	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-done-http/cancel", "org-alpha", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("cancel completed job status = %d (%s), want 409", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStartSnapshotterPeriodicAndShutdown(t *testing.T) {
+	coord := orchestrator.NewCoordinator()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	srv := server.New(coord).WithLogger(logger)
+
+	// Empty path or non-positive interval closes done immediately.
+	select {
+	case <-srv.StartSnapshotter(context.Background(), "", time.Second):
+	case <-time.After(time.Second):
+		t.Fatal("StartSnapshotter with empty path did not close done immediately")
+	}
+	select {
+	case <-srv.StartSnapshotter(context.Background(), filepath.Join(t.TempDir(), "s.json"), 0):
+	case <-time.After(time.Second):
+		t.Fatal("StartSnapshotter with interval=0 did not close done immediately")
+	}
+
+	if _, err := coord.SubmitJob("job-snap-1", "org-alpha", cost.GPUL4, 10, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	snapPath := filepath.Join(t.TempDir(), "nested", "state.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := srv.StartSnapshotter(ctx, snapPath, 5*time.Millisecond)
+
+	// Wait for at least one periodic snapshot to be written.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(snapPath); err == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(snapPath); err != nil {
+		cancel()
+		<-done
+		t.Fatalf("periodic snapshot was not created: %v", err)
+	}
+
+	// Mutate coordinator state, then cancel context to trigger final shutdown flush.
+	if _, err := coord.SubmitJob("job-snap-2", "org-alpha", cost.GPUL4, 20, 1); err != nil {
+		cancel()
+		<-done
+		t.Fatal(err)
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartSnapshotter did not exit after context cancellation")
+	}
+
+	restored, err := orchestrator.LoadCoordinatorFromFile(snapPath)
+	if err != nil {
+		t.Fatalf("LoadCoordinatorFromFile: %v", err)
+	}
+	if _, err := restored.GetJob("job-snap-1"); err != nil {
+		t.Fatalf("expected job-snap-1 in final snapshot: %v", err)
+	}
+	if _, err := restored.GetJob("job-snap-2"); err != nil {
+		t.Fatalf("expected job-snap-2 in final shutdown snapshot: %v", err)
+	}
+
+	// Verify error logging when snapshot path is unwritable (parent is a regular file).
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	errCtx, errCancel := context.WithCancel(context.Background())
+	errDone := srv.StartSnapshotter(errCtx, filepath.Join(blocker, "state.json"), 5*time.Millisecond)
+	errCancel()
+	select {
+	case <-errDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartSnapshotter error case did not exit")
+	}
+	if !strings.Contains(logBuf.String(), "coordinator snapshot failed") {
+		t.Fatalf("expected error log on snapshot failure, got %q", logBuf.String())
 	}
 }

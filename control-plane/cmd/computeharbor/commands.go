@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ func runStatus(args []string, out io.Writer) error {
 	baseURL := fs.String("url", defaultControlPlaneURL, "Control plane base URL")
 	orgID := fs.String("org", "", "Organization ID for X-Org-ID header (required)")
 	jobID := fs.String("job", "", "Optional job ID to inspect a single job")
+	apiKey := fs.String("api-key", os.Getenv("COMPUTEHARBOR_API_KEY"), "Optional Bearer API key for HTTP authentication")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -35,7 +37,7 @@ func runStatus(args []string, out io.Writer) error {
 		endpoint += "/" + url.PathEscape(job)
 	}
 
-	return fetchAndPrintJSON(endpoint, org, out)
+	return doJSONGet(&http.Client{Timeout: 10 * time.Second}, endpoint, org, strings.TrimSpace(*apiKey), out)
 }
 
 func runSavings(args []string, out io.Writer) error {
@@ -44,6 +46,7 @@ func runSavings(args []string, out io.Writer) error {
 	minVRAM := fs.Int("min-vram", 24, "Minimum GPU VRAM in GB")
 	provider := fs.String("provider", "", "Optional cloud provider filter")
 	minAvail := fs.Float64("min-availability", 0.0, "Minimum fleet availability score")
+	apiKey := fs.String("api-key", os.Getenv("COMPUTEHARBOR_API_KEY"), "Optional Bearer API key for HTTP authentication")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -56,10 +59,35 @@ func runSavings(args []string, out io.Writer) error {
 	}
 
 	endpoint := strings.TrimRight(*baseURL, "/") + "/v1/fleet/rank?" + q.Encode()
-	return fetchAndPrintJSON(endpoint, "", out)
+	return doJSONGet(&http.Client{Timeout: 10 * time.Second}, endpoint, "", strings.TrimSpace(*apiKey), out)
 }
 
-func fetchAndPrintJSON(endpoint, orgID string, out io.Writer) error {
+func runBilling(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("computeharbor billing", flag.ContinueOnError)
+	baseURL := fs.String("url", defaultControlPlaneURL, "Control plane base URL")
+	orgID := fs.String("org", "", "Organization ID for X-Org-ID header (required)")
+	fee := fs.Float64("fee", 0.12, "Platform savings fee fraction")
+	apiKey := fs.String("api-key", os.Getenv("COMPUTEHARBOR_API_KEY"), "Optional Bearer API key for HTTP authentication")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	org := strings.TrimSpace(*orgID)
+	if org == "" {
+		return errors.New("-org is required")
+	}
+
+	q := url.Values{}
+	q.Set("fee", strconv.FormatFloat(*fee, 'f', -1, 64))
+
+	endpoint := strings.TrimRight(*baseURL, "/") + "/v1/billing/summary?" + q.Encode()
+	return doJSONGet(&http.Client{Timeout: 10 * time.Second}, endpoint, org, strings.TrimSpace(*apiKey), out)
+}
+
+func doJSONGet(client *http.Client, endpoint, orgID, apiKey string, out io.Writer) error {
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
@@ -67,8 +95,10 @@ func fetchAndPrintJSON(endpoint, orgID string, out io.Writer) error {
 	if orgID != "" {
 		req.Header.Set("X-Org-ID", orgID)
 	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

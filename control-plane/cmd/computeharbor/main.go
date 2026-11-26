@@ -29,10 +29,17 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
-	if len(args) > 0 && args[0] == "serve" {
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return runServe(ctx, args[1:], out)
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return runServe(ctx, args[1:], out)
+		case "status":
+			return runStatus(args[1:], out)
+		case "savings":
+			return runSavings(args[1:], out)
+		}
 	}
 
 	fs := flag.NewFlagSet("computeharbor", flag.ContinueOnError)

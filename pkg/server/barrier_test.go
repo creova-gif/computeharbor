@@ -107,3 +107,64 @@ func TestBarrierEndpoint(t *testing.T) {
 		t.Fatalf("missing org status = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestBarrierCleanupOnCompletionAndCancel(t *testing.T) {
+	coord := orchestrator.NewCoordinator()
+	srv := server.New(coord)
+
+	// 1. Completion via final checkpoint removes the barrier entry.
+	if _, err := coord.SubmitJob("job-complete", "org-a", cost.GPUH100_80G, 100, 3); err != nil {
+		t.Fatalf("SubmitJob complete: %v", err)
+	}
+	rec := doJSON(t, srv, http.MethodPost, "/v1/jobs/job-complete/assign", "org-a", map[string]string{
+		"worker_node_id": "node-1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign complete status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-complete/barrier", "org-a", map[string]any{
+		"world_size": 2,
+		"rank":       0,
+		"step":       10,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("barrier complete status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !srv.HasBarrier("job-complete") {
+		t.Fatal("expected barrier entry for job-complete before completion")
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-complete/checkpoint", "org-a", orchestrator.CheckpointRef{
+		Step: 100,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checkpoint complete status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if srv.HasBarrier("job-complete") {
+		t.Fatal("expected barrier entry for job-complete to be deleted on completion")
+	}
+
+	// 2. Cancellation removes the barrier entry.
+	if _, err := coord.SubmitJob("job-cancel", "org-a", cost.GPUH100_80G, 100, 3); err != nil {
+		t.Fatalf("SubmitJob cancel: %v", err)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel/barrier", "org-a", map[string]any{
+		"world_size": 2,
+		"rank":       0,
+		"step":       10,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("barrier cancel status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !srv.HasBarrier("job-cancel") {
+		t.Fatal("expected barrier entry for job-cancel before cancellation")
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel/cancel", "org-a", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if srv.HasBarrier("job-cancel") {
+		t.Fatal("expected barrier entry for job-cancel to be deleted on cancellation")
+	}
+}

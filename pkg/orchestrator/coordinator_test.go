@@ -469,3 +469,32 @@ func TestCoordinatorLifecycleEventEmission(t *testing.T) {
 		}
 	}
 }
+
+func TestReapStaleLeasesHealthyNoAlloc(t *testing.T) {
+	now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	sink := &recordingSink{}
+	coord := NewCoordinator().WithClock(func() time.Time { return now }).WithEventSink(sink)
+
+	for i := 0; i < 50; i++ {
+		jobID := fmt.Sprintf("healthy-job-%d", i)
+		if _, err := coord.SubmitJob(jobID, "org-1", cost.GPUL4, 10, 2); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := coord.AssignWorker(jobID, fmt.Sprintf("worker-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sinkBefore := len(sink.events)
+	allocs := testing.AllocsPerRun(100, func() {
+		if reaped := coord.ReapStaleLeases(30 * time.Second); len(reaped) != 0 {
+			t.Fatalf("ReapStaleLeases = %d, want 0", len(reaped))
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("ReapStaleLeases healthy-fleet allocs/run = %v, want 0", allocs)
+	}
+	if len(sink.events) != sinkBefore {
+		t.Fatalf("emitted %d events on healthy fleet, want 0", len(sink.events)-sinkBefore)
+	}
+}

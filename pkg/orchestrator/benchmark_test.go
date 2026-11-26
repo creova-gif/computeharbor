@@ -73,3 +73,25 @@ func BenchmarkCoordinatorReapStaleLeases(b *testing.B) {
 		b.StartTimer()
 	}
 }
+
+func BenchmarkCoordinatorReapStaleLeasesHealthy(b *testing.B) {
+	const totalJobs = 200
+
+	now := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	coord := NewCoordinator().WithClock(func() time.Time { return now })
+
+	for i := 0; i < totalJobs; i++ {
+		jobID := fmt.Sprintf("healthy-job-%d", i)
+		if _, err := coord.SubmitJob(jobID, "org-bench", cost.GPUL4, 100, 3); err != nil {
+			b.Fatalf("SubmitJob failed: %v", err)
+		}
+		if _, err := coord.AssignWorker(jobID, fmt.Sprintf("worker-%d", i)); err != nil {
+			b.Fatalf("AssignWorker failed: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchReaped = coord.ReapStaleLeases(30 * time.Second)
+	}
+}

@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go 1.23+](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-v0.1.0-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.2.0-green.svg)](CHANGELOG.md)
 
 ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptible spot GPU pools. When a provider sends `SIGTERM` for a 30-second spot eviction, the worker flushes only the mutable LoRA adapter matrices, AdamW moment buffers, and PRNG state in Safetensors format via an atomic write-and-rename commit.
 
@@ -40,7 +40,7 @@ Start the control plane, then run the Python quickstart ([`examples/quickstart.p
 | Command | Purpose | Key Flags |
 | --- | --- | --- |
 | `computeharbor` | Estimate spot vs on-demand cost or rank pools | `-gpu`, `-count`, `-hours`, `-preemptions`, `-recovery-sec`, `-fee`, `-rank-vram` |
-| `computeharbor serve` | Start the HTTP control-plane API & stale-lease reaper | `-addr`, `-reap-interval`, `-lease-ttl`, `-state-file`, `-rate-limit-rps`, `-rate-limit-burst`, `-log-json`, `-webhook-url`, `-webhook-secret` |
+| `computeharbor serve` | Start the HTTP control-plane API & stale-lease reaper | `-addr`, `-reap-interval`, `-lease-ttl`, `-state-file`, `-rate-limit-rps`, `-rate-limit-burst`, `-log-json`, `-webhook-url`, `-webhook-secret`, `-api-key` |
 | `computeharbor status` | Query org jobs or a single job lease as JSON | `-url`, `-org` (required), `-job` |
 | `computeharbor savings` | Rank multi-region spot fleet placements | `-url`, `-min-vram`, `-provider`, `-min-availability` |
 
@@ -57,7 +57,7 @@ Start the control plane, then run the Python quickstart ([`examples/quickstart.p
     --target-steps 30 \
     --heartbeat-interval-sec 0.5
   ```
-  Optional flags: `--remote-store-dir` (object-store mirror), `--metadata-provider gcp|aws` (poll cloud preemption metadata and trigger `SIGTERM`, with `--metadata-url` and `--metadata-poll-sec`), `--step-delay-sec`, `--ready-file`, and `--summary-out`.
+  Optional flags: `--remote-store-dir` (object-store mirror), `--max-checkpoints` (retained local checkpoint pairs, default `5`, `0` for unlimited), `--metadata-provider gcp|aws` (poll cloud preemption metadata and trigger `SIGTERM`, with `--metadata-url` and `--metadata-poll-sec`), `--step-delay-sec`, `--ready-file`, and `--summary-out`.
 - **`computeharbor-supervisor`** (`computeharbor_worker.supervisor`): Submits a job and supervises multi-attempt spot failover across preemptions up to `--max-preemptions` (`--control-plane-url`, `--org-id`, `--job-id`, `--gpu`, `--checkpoint-dir`, `--target-steps`, `--worker-prefix`, `--remote-store-dir`, `--summary-out`).
 - **`computeharbor-batch`** (`computeharbor_worker.batch_inference`): Runs deterministic, checkpointed batch inference with atomic `SIGTERM` cursor recovery (`--job-id`, `--checkpoint-dir`, `--prompts-file`, `--num-prompts`, `--seed`, `--batch-size`, `--spot-hourly-usd`, `--record-delay-sec`, `--ready-file`, `--manifest-out`).
 
@@ -90,6 +90,7 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 - `-rate-limit-rps` / `-rate-limit-burst`: Per-org token-bucket rate limiting (`0` disables; default burst `20`).
 - `-log-json`: Emit structured JSON HTTP request logs via `slog` to `stderr` (default `true`).
 - `-webhook-url` / `-webhook-secret`: Async HTTP endpoint and HMAC-SHA256 secret for signed lifecycle webhook delivery.
+- `-api-key`: Optional Bearer API key for HTTP authentication (defaults to `COMPUTEHARBOR_API_KEY`).
 
 ## Deployment & Observability
 
@@ -155,4 +156,4 @@ PYTHONPATH=worker/src .venv/bin/python tests/chaos/test_sigterm_preemption.py
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, test/lint requirements, and PR guidelines. Also see [`AGENTS.md`](AGENTS.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, test/lint requirements, and PR guidelines. Also see [`SECURITY.md`](SECURITY.md), [`AGENTS.md`](AGENTS.md), [`LICENSE`](LICENSE), [`docs/adr/000-template.md`](docs/adr/000-template.md), and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).

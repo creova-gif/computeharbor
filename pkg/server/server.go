@@ -100,6 +100,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/sigterm", s.handleNotifySIGTERM)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/checkpoint", s.handleCommitCheckpoint)
+	s.mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.handleCancelJob)
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
 	s.mux.HandleFunc("POST /v1/schedule", s.handleSchedule)
 }
@@ -305,6 +306,20 @@ func (s *Server) handleCommitCheckpoint(w http.ResponseWriter, r *http.Request) 
 	}
 
 	lease, err := s.coord.CommitCheckpoint(id, ref)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toJobLeaseResponse(lease))
+}
+
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.authorizeJob(w, r, id); !ok {
+		return
+	}
+
+	lease, err := s.coord.CancelJob(id)
 	if err != nil {
 		writeDomainError(w, err)
 		return

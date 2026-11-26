@@ -206,6 +206,7 @@ func TestTenantIsolationAndNotFound(t *testing.T) {
 		{http.MethodPost, "/v1/jobs/job-iso/heartbeat", map[string]string{"worker_node_id": "w1"}},
 		{http.MethodPost, "/v1/jobs/job-iso/sigterm", nil},
 		{http.MethodPost, "/v1/jobs/job-iso/checkpoint", map[string]any{"step": 1}},
+		{http.MethodPost, "/v1/jobs/job-iso/cancel", nil},
 	}
 
 	for _, ep := range endpoints {
@@ -575,5 +576,79 @@ func TestStartReaperAndCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("StartReaper did not exit after context cancellation")
+	}
+}
+
+func TestCancelJobEndpoint(t *testing.T) {
+	srv := server.New(orchestrator.NewCoordinator())
+
+	// Submit and assign job.
+	rec := doJSON(t, srv, http.MethodPost, "/v1/jobs", "", map[string]any{
+		"job_id":          "job-cancel-http",
+		"org_id":          "org-alpha",
+		"gpu":             string(cost.GPUL4),
+		"target_steps":    10,
+		"max_preemptions": 1,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("submit status = %d, want 201", rec.Code)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel-http/assign", "org-alpha", map[string]string{
+		"worker_node_id": "node-1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign status = %d, want 200", rec.Code)
+	}
+
+	// X-Org-ID enforcement: missing and wrong org return 403.
+	for _, org := range []string{"", "org-other"} {
+		rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel-http/cancel", org, nil)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cancel with X-Org-ID=%q status = %d, want 403", org, rec.Code)
+		}
+	}
+
+	// Valid cancel -> 200, status CANCELLED, worker cleared.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel-http/cancel", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	lease := decodeLease(t, rec)
+	if lease.Status != orchestrator.StatusCancelled || lease.WorkerNodeID != "" {
+		t.Fatalf("cancelled lease = %+v, want CANCELLED with empty WorkerNodeID", lease)
+	}
+
+	// Idempotent second cancel -> 200.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-cancel-http/cancel", "org-alpha", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second cancel status = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if got := decodeLease(t, rec); got.Status != orchestrator.StatusCancelled {
+		t.Fatalf("second cancel status = %s, want CANCELLED", got.Status)
+	}
+
+	// Cancelling a COMPLETED job -> 409 Conflict.
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs", "", map[string]any{
+		"job_id":       "job-done-http",
+		"org_id":       "org-alpha",
+		"gpu":          string(cost.GPUL4),
+		"target_steps": 5,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("submit done job status = %d, want 201", rec.Code)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-done-http/assign", "org-alpha", map[string]string{
+		"worker_node_id": "node-2",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assign done job status = %d, want 200", rec.Code)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-done-http/checkpoint", "org-alpha", map[string]any{"step": 5})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checkpoint done job status = %d, want 200", rec.Code)
+	}
+	rec = doJSON(t, srv, http.MethodPost, "/v1/jobs/job-done-http/cancel", "org-alpha", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("cancel completed job status = %d (%s), want 409", rec.Code, rec.Body.String())
 	}
 }

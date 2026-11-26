@@ -19,6 +19,7 @@ const (
 	StatusMigrating     JobStatus = "MIGRATING"
 	StatusCompleted     JobStatus = "COMPLETED"
 	StatusFailed        JobStatus = "FAILED"
+	StatusCancelled     JobStatus = "CANCELLED"
 )
 
 var (
@@ -246,6 +247,29 @@ func (c *Coordinator) CommitCheckpoint(jobID string, ref CheckpointRef) (JobLeas
 	return cloneLease(job), nil
 }
 
+// CancelJob transitions a non-terminal job to StatusCancelled, clearing its
+// active worker assignment. Cancelling an already-cancelled job is idempotent.
+func (c *Coordinator) CancelJob(jobID string) (JobLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	job, ok := c.jobs[jobID]
+	if !ok {
+		return JobLease{}, fmt.Errorf("%w: %s", ErrJobNotFound, jobID)
+	}
+	if job.Status == StatusCancelled {
+		return cloneLease(job), nil
+	}
+	if job.Status == StatusCompleted || job.Status == StatusFailed {
+		return JobLease{}, fmt.Errorf("%w: cannot cancel job in state %s", ErrInvalidTransition, job.Status)
+	}
+
+	job.Status = StatusCancelled
+	job.WorkerNodeID = ""
+	job.UpdatedAt = c.now()
+	return cloneLease(job), nil
+}
+
 func (c *Coordinator) GetJob(jobID string) (JobLease, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -288,6 +312,7 @@ func (c *Coordinator) Stats() CoordinatorStats {
 			StatusMigrating:     0,
 			StatusCompleted:     0,
 			StatusFailed:        0,
+			StatusCancelled:     0,
 		},
 		TotalCheckpoints: c.totalCheckpoints,
 	}

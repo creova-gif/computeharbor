@@ -1,4 +1,8 @@
-from computeharbor_worker.batch_inference import BatchCursorManifest, BatchInferenceRunner
+from computeharbor_worker.batch_inference import (
+    BatchCursorManifest,
+    BatchInferenceRunner,
+    BatchRunSummary,
+)
 from computeharbor_worker.checkpoint import CheckpointManager
 from computeharbor_worker.client import ControlPlaneClient, ControlPlaneError
 from computeharbor_worker.daemon import run_worker_daemon
@@ -17,6 +21,7 @@ from computeharbor_worker.trainer import LoRATrainer, RunResult
 __all__ = [
     "BatchCursorManifest",
     "BatchInferenceRunner",
+    "BatchRunSummary",
     "CheckpointManager",
     "CheckpointManifest",
     "CheckpointStore",

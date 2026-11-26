@@ -32,5 +32,5 @@
 
 ## Wave 7: Customer Web Console, OpenAPI Spec, & SDK
 - [x] Publish OpenAPI 3.1 specification (`docs/openapi.yaml`) for all control-plane endpoints
-- [ ] Build lightweight static status & savings web UI served at `GET /ui`
+- [x] Build lightweight static status & savings web UI served at `GET /ui`
 - [x] Add typed Python & Go client SDK examples in `examples/`

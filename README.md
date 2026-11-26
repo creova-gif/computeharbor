@@ -68,6 +68,7 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 | Method & Path | Auth / Headers | Request / Query | Response |
 | --- | --- | --- | --- |
 | `GET /healthz` | None | — | `200 OK` `{"status":"ok"}` |
+| `GET /ui` | None | — | `200 OK` HTML status & spot savings web console ([`pkg/server/ui.go`](pkg/server/ui.go)) |
 | `GET /metrics` | None | — | `200 OK` Prometheus `0.0.4` text metrics ([ADR-003](docs/adr/003-prometheus-observability.md)) |
 | `POST /v1/jobs` | `Content-Type: application/json` | `job_id`, `org_id`, `gpu`, `target_steps`, `max_preemptions` | `201 Created` `JobLease` |
 | `GET /v1/jobs` | `X-Org-ID` | — | `200 OK` array of org-scoped `JobLease` objects |

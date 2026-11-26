@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-26
+
+### Added
+- **Kubernetes Readiness Probe & Request Correlation (`pkg/server`, `docs/openapi.yaml`, `ADR-006`):** Unauthenticated `GET /readyz` endpoint with graceful-drain (`503 {"status":"draining"}` vs `200 {"status":"ready"}`) semantics and `X-Request-ID` correlation middleware echoed on responses and logged via `slog` (`#62`).
+- **Remote Checkpoint Job-Namespacing & Cross-Node E2E (`worker/`, `tests/e2e/`):** Namespaced remote `latest.json` checkpoint pointers per `job_id` (`#58`) and added cross-node remote spot migration end-to-end verification (`#59`).
+- **Accessible & Responsive Web Console (`pkg/server/ui.go`):** WCAG 2.1 AA accessible and responsive `/ui` control-plane console (`#60`).
+- **Enterprise Governance & Threat Model (`CODEOWNERS`, `.github/dependabot.yml`, `.env.example`, `THREAT_MODEL.md`):** Added repository governance, automated dependency updates, environment template, and expanded threat model (`#61`).
+
+### Security
+- **Snapshot Permissions & Webhook Hardening (`pkg/orchestrator`, `pkg/events`, `ADR-006`):** Enforced `0o600` permissions on atomic coordinator snapshot files and hardened webhook delivery with `ValidateWebhookURL` (HTTP/HTTPS, non-empty host, no embedded userinfo) and `http.ErrUseLastResponse` redirect blocking (`#63`).
+
 ## [0.2.1] - 2026-11-26
 
 ### Added

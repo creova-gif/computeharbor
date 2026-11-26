@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go 1.23+](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-v0.2.1-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.2.2-green.svg)](CHANGELOG.md)
 
 ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptible spot GPU pools. When a provider sends `SIGTERM` for a 30-second spot eviction, the worker flushes only the mutable LoRA adapter matrices, AdamW moment buffers, and PRNG state in Safetensors format via an atomic write-and-rename commit.
 
@@ -68,6 +68,7 @@ Full OpenAPI 3.1 specification: [`docs/openapi.yaml`](docs/openapi.yaml). Tenant
 | Method & Path | Auth / Headers | Request / Query | Response |
 | --- | --- | --- | --- |
 | `GET /healthz` | None | — | `200 OK` `{"status":"ok"}` |
+| `GET /readyz` | None | — | `200 OK` `{"status":"ready"}` or `503 Service Unavailable` `{"status":"draining"}` |
 | `GET /ui` | None | — | `200 OK` HTML status & spot savings web console ([`pkg/server/ui.go`](pkg/server/ui.go)) |
 | `GET /metrics` | None | — | `200 OK` Prometheus `0.0.4` text metrics ([ADR-003](docs/adr/003-prometheus-observability.md)) |
 | `POST /v1/jobs` | `Content-Type: application/json` | `job_id`, `org_id`, `gpu`, `target_steps`, `max_preemptions` | `201 Created` `JobLease` |
@@ -115,7 +116,7 @@ docker compose up --build
 - [`pkg/orchestrator/coordinator.go`](pkg/orchestrator/coordinator.go): Thread-safe job lease state machine (`QUEUED` -> `RUNNING` -> `CHECKPOINTING` -> `MIGRATING` -> `COMPLETED` / `FAILED`) with idempotent `SIGTERM` handling, step-regression guards, and `RingBarrier` synchronization.
 - [`worker/src/computeharbor_worker/`](worker/src/computeharbor_worker/): Python 3.12+ worker that intercepts `SIGTERM`, syncs CUDA when available, writes LoRA weights and AdamW state to a temporary Safetensors file, calls `os.fsync`, atomically swaps `latest.json`, optionally replicates to an object-store mirror (`--remote-store-dir`), and verifies SHA-256 integrity on restore.
 - [`tests/chaos/test_sigterm_preemption.py`](tests/chaos/test_sigterm_preemption.py): Subprocess chaos harness that injects three OS `SIGTERM` signals into a live training run and checks bit-for-bit loss and weight parity against an uninterrupted baseline.
-- Architecture Decision Records: [`ADR-001`](docs/adr/001-lora-streaming-checkpoints.md), [`ADR-002`](docs/adr/002-control-plane-http-api.md), [`ADR-003`](docs/adr/003-prometheus-observability.md), [`ADR-004`](docs/adr/004-rate-limiting-and-observability.md), and [`ADR-005`](docs/adr/005-event-webhooks-and-fleet-routing.md).
+- Architecture Decision Records: [`ADR-001`](docs/adr/001-lora-streaming-checkpoints.md), [`ADR-002`](docs/adr/002-control-plane-http-api.md), [`ADR-003`](docs/adr/003-prometheus-observability.md), [`ADR-004`](docs/adr/004-rate-limiting-and-observability.md), [`ADR-005`](docs/adr/005-event-webhooks-and-fleet-routing.md), and [`ADR-006`](docs/adr/006-readiness-and-request-correlation.md).
 
 ## Measured Benchmarks
 

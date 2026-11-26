@@ -5,6 +5,9 @@ info:
   description: |
     HTTP/JSON control plane for spot-GPU LoRA training orchestration, preemption
     failover, multi-cloud fleet placement, cost estimation, and organization billing.
+    Every HTTP response includes an `X-Request-ID` correlation header (echoing a
+    valid incoming printable-ASCII `X-Request-ID` up to 128 bytes, or generating
+    a 32-character hex identifier) that is also recorded in structured logs.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -29,9 +32,13 @@ paths:
       tags: [System]
       summary: Control plane liveness probe
       operationId: getHealthz
+      security: []
       responses:
         "200":
           description: Service is healthy
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -42,6 +49,46 @@ paths:
                     type: string
                     examples: ["ok"]
 
+  /readyz:
+    get:
+      tags: [System]
+      summary: Kubernetes readiness probe with graceful-drain support
+      description: |
+        Unauthenticated readiness probe for Kubernetes and load balancers.
+        Returns `200 OK` when ready to accept traffic and `503 Service Unavailable`
+        while the server is draining.
+      operationId: getReadyz
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept traffic
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    examples: ["ready"]
+        "503":
+          description: Service is draining and should be removed from load-balancer rotation
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    examples: ["draining"]
+
   /metrics:
     get:
       tags: [System]
@@ -50,6 +97,9 @@ paths:
       responses:
         "200":
           description: Prometheus text exposition format metrics
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             text/plain:
               schema:
@@ -74,6 +124,9 @@ paths:
       responses:
         "201":
           description: Job created in QUEUED state
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -95,6 +148,9 @@ paths:
       responses:
         "200":
           description: List of job leases belonging to the organization
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -117,6 +173,9 @@ paths:
       responses:
         "200":
           description: Current job lease state
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -145,6 +204,9 @@ paths:
       responses:
         "200":
           description: Job transitioned to RUNNING
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -177,6 +239,9 @@ paths:
       responses:
         "200":
           description: Lease heartbeat timestamp updated
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -203,6 +268,9 @@ paths:
       responses:
         "200":
           description: Job transitioned to CHECKPOINTING (or idempotent existing state)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -233,6 +301,9 @@ paths:
       responses:
         "200":
           description: Checkpoint committed; job transitions to MIGRATING or COMPLETED
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -261,6 +332,9 @@ paths:
       responses:
         "200":
           description: Job transitioned to CANCELLED
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -291,6 +365,9 @@ paths:
       responses:
         "200":
           description: Barrier rank committed and current consensus state returned
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -322,6 +399,9 @@ paths:
       responses:
         "200":
           description: Selected spot pool and ranked alternatives
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -373,6 +453,9 @@ paths:
       responses:
         "200":
           description: Ranked cost estimates sorted by lowest net customer cost
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -417,6 +500,9 @@ paths:
       responses:
         "200":
           description: Ranked regional fleet placements
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -440,6 +526,9 @@ paths:
       responses:
         "200":
           description: Organization billing and savings summary
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
           content:
             application/json:
               schema:
@@ -476,33 +565,55 @@ components:
         minLength: 1
       example: job-lora-001
 
+  headers:
+    RequestID:
+      description: Correlation identifier echoed from a valid incoming X-Request-ID header (printable ASCII, max 128 bytes) or generated as a 32-character hex string.
+      schema:
+        type: string
+      example: 4bf92f3577b34da6a3ce929d0e0e4736
+
   responses:
     BadRequest:
       description: Malformed request or missing required fields
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Forbidden:
       description: Missing or mismatched X-Org-ID header
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     NotFound:
       description: Job not found
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Conflict:
       description: Resource conflict or invalid state transition
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     UnprocessableEntity:
       description: Validation failed for domain constraints
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
@@ -510,6 +621,8 @@ components:
     TooManyRequests:
       description: Per-organization rate limit exceeded
       headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
         Retry-After:
           description: Seconds to wait before retrying
           schema:

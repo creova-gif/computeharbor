@@ -197,6 +197,7 @@ func serveListenerWithConfig(ctx context.Context, ln net.Listener, out io.Writer
 			return err
 		}
 	case <-ctx.Done():
+		api.SetDraining(true)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

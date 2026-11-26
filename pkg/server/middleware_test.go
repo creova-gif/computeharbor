@@ -2,11 +2,13 @@ package server_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -255,6 +257,12 @@ func TestBearerAuthMiddleware(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			name:       "GET /readyz bypasses auth",
+			method:     http.MethodGet,
+			path:       "/readyz",
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "GET /ui bypasses auth",
 			method:     http.MethodGet,
 			path:       "/ui",
@@ -264,6 +272,12 @@ func TestBearerAuthMiddleware(t *testing.T) {
 			name:       "POST /healthz does not bypass auth",
 			method:     http.MethodPost,
 			path:       "/healthz",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "POST /readyz does not bypass auth",
+			method:     http.MethodPost,
+			path:       "/readyz",
 			wantStatus: http.StatusUnauthorized,
 		},
 	}
@@ -313,5 +327,113 @@ func TestOrgRateLimiterEviction(t *testing.T) {
 	// After eviction, org-victim gets a fresh bucket.
 	if !limiter.Allow("org-victim") {
 		t.Fatal("expected org-victim to be allowed after bucket eviction")
+	}
+}
+
+func TestRequestIDMiddleware(t *testing.T) {
+	t.Run("generates 16-byte hex ID when absent", func(t *testing.T) {
+		var ctxID string
+		handler := server.RequestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctxID = server.RequestIDFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		got := rec.Header().Get("X-Request-ID")
+		if len(got) != 32 {
+			t.Fatalf("expected 32-char hex X-Request-ID, got %q (len %d)", got, len(got))
+		}
+		if _, err := hex.DecodeString(got); err != nil {
+			t.Fatalf("expected valid hex X-Request-ID, got %q: %v", got, err)
+		}
+		if ctxID != got {
+			t.Fatalf("context request ID %q != response header %q", ctxID, got)
+		}
+	})
+
+	t.Run("preserves valid incoming X-Request-ID", func(t *testing.T) {
+		var ctxID string
+		handler := server.RequestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctxID = server.RequestIDFromContext(r.Context())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		const incoming = "req-abc-123_XYZ"
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req.Header.Set("X-Request-ID", incoming)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("X-Request-ID"); got != incoming {
+			t.Fatalf("expected preserved X-Request-ID %q, got %q", incoming, got)
+		}
+		if ctxID != incoming {
+			t.Fatalf("expected context request ID %q, got %q", incoming, ctxID)
+		}
+	})
+
+	t.Run("rejects invalid incoming X-Request-ID and generates fresh one", func(t *testing.T) {
+		invalidInputs := []struct {
+			name string
+			val  string
+		}{
+			{name: "whitespace only", val: "   "},
+			{name: "newline control char", val: "bad\nid"},
+			{name: "null control char", val: "bad\x00id"},
+			{name: "del control char", val: "bad\x7fid"},
+			{name: "non-ascii", val: "bad-🚀"},
+			{name: "oversized >128 chars", val: strings.Repeat("a", 129)},
+		}
+
+		for _, tc := range invalidInputs {
+			t.Run(tc.name, func(t *testing.T) {
+				var ctxID string
+				handler := server.RequestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					ctxID = server.RequestIDFromContext(r.Context())
+					w.WriteHeader(http.StatusOK)
+				}))
+
+				req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+				req.Header.Set("X-Request-ID", tc.val)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+
+				got := rec.Header().Get("X-Request-ID")
+				if got == tc.val || len(got) != 32 {
+					t.Fatalf("expected fresh 32-char hex ID, got %q", got)
+				}
+				if _, err := hex.DecodeString(got); err != nil {
+					t.Fatalf("expected valid hex ID, got %q: %v", got, err)
+				}
+				if ctxID != got {
+					t.Fatalf("context request ID %q != response header %q", ctxID, got)
+				}
+			})
+		}
+	})
+}
+
+func TestLoggingMiddlewareIncludesRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	handler := server.RequestIDMiddleware(server.LoggingMiddleware(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("X-Request-ID", "corr-id-42")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var entry map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("unmarshal log output: %v (raw: %s)", err, buf.String())
+	}
+	if got := entry["request_id"]; got != "corr-id-42" {
+		t.Fatalf("expected request_id corr-id-42, got %v", got)
 	}
 }

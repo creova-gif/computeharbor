@@ -82,6 +82,80 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestReadyzAndDraining(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	srv := server.New(orchestrator.NewCoordinator()).
+		WithAPIKey("secret-api-key").
+		WithLogger(logger)
+
+	if srv.IsDraining() {
+		t.Fatal("expected new server IsDraining() == false")
+	}
+
+	// Ready state without Bearer auth -> 200 {"status":"ready"} and X-Request-ID set.
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("X-Request-ID", "k8s-probe-1")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /readyz status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Request-ID"); got != "k8s-probe-1" {
+		t.Fatalf("X-Request-ID = %q, want %q", got, "k8s-probe-1")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode readyz: %v", err)
+	}
+	if payload["status"] != "ready" {
+		t.Errorf("readyz status = %q, want %q", payload["status"], "ready")
+	}
+
+	// Draining state without Bearer auth -> 503 {"status":"draining"}.
+	srv.SetDraining(true)
+	if !srv.IsDraining() {
+		t.Fatal("expected IsDraining() == true after SetDraining(true)")
+	}
+	rec = doJSON(t, srv, http.MethodGet, "/readyz", "", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz while draining status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("X-Request-ID") == "" {
+		t.Fatal("expected generated X-Request-ID on draining /readyz response")
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode draining readyz: %v", err)
+	}
+	if payload["status"] != "draining" {
+		t.Errorf("readyz draining status = %q, want %q", payload["status"], "draining")
+	}
+
+	// Recovering from draining -> 200 {"status":"ready"}.
+	srv.SetDraining(false)
+	rec = doJSON(t, srv, http.MethodGet, "/readyz", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /readyz after SetDraining(false) status = %d, want 200", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode recovered readyz: %v", err)
+	}
+	if payload["status"] != "ready" {
+		t.Errorf("readyz recovered status = %q, want %q", payload["status"], "ready")
+	}
+
+	// Verify first log line recorded request_id.
+	firstLine := bytes.Split(bytes.TrimSpace(logBuf.Bytes()), []byte("\n"))[0]
+	var logEntry map[string]any
+	if err := json.Unmarshal(firstLine, &logEntry); err != nil {
+		t.Fatalf("unmarshal log line: %v", err)
+	}
+	if logEntry["request_id"] != "k8s-probe-1" {
+		t.Fatalf("logged request_id = %v, want %q", logEntry["request_id"], "k8s-probe-1")
+	}
+}
+
 func TestThreePreemptionHTTPLifecycle(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	coord := orchestrator.NewCoordinator().WithClock(func() time.Time { return now })

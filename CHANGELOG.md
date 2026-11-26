@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Prometheus Observability (`pkg/server`):** `GET /metrics` endpoint emitting Prometheus `0.0.4` text metrics (`ADR-003`).
+- **Coordinator Snapshot Persistence (`pkg/orchestrator`, `control-plane/`):** `CoordinatorSnapshot` atomic JSON persistence and `-state-file` flag on `computeharbor serve` for crash/restart recovery.
+- **Presigned Object Store (`worker/`):** `HTTPPresignedStore` and `store_from_uri` factory supporting `http://`, `https://`, `file://`, `gs://`, and `s3://` checkpoint replication targets.
+- **Cloud Metadata Spot Watcher (`worker/`):** `MetadataPreemptionWatcher` with `--metadata-provider gcp|aws` in `computeharbor_worker.daemon` to poll cloud preemption endpoints and trigger `SIGTERM` checkpointing.
+- **Container & Compose Deployment (`Dockerfile`, `Dockerfile.worker`, `docker-compose.yml`, `deploy/prometheus.yml`):** Distroless Go control-plane image, Python 3.12 worker image, and Docker Compose stack with Prometheus scraping.
+
 ## [0.1.0] - 2026-11-25
 
 ### Added

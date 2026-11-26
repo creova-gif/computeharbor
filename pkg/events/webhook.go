@@ -15,9 +15,11 @@ import (
 
 const (
 	// SignatureHeader is the HTTP header carrying the HMAC-SHA256 payload signature.
-	SignatureHeader = "X-ComputeHarbor-Signature"
-	signaturePrefix = "sha256="
-	defaultBufSize  = 256
+	SignatureHeader   = "X-ComputeHarbor-Signature"
+	signaturePrefix   = "sha256="
+	defaultBufSize    = 256
+	defaultMaxRetries = 2
+	defaultBackoff    = 50 * time.Millisecond
 )
 
 // EventType identifies a job lifecycle transition emitted by the orchestrator.
@@ -51,15 +53,19 @@ type Sink interface {
 
 // WebhookDispatcher asynchronously delivers events as HMAC-SHA256 signed HTTP POST requests.
 type WebhookDispatcher struct {
-	endpoint string
-	secret   string
-	client   *http.Client
+	endpoint    string
+	secret      string
+	client      *http.Client
+	maxRetries  int
+	backoffBase time.Duration
 
-	ch      chan Event
-	mu      sync.RWMutex
-	closed  bool
-	wg      sync.WaitGroup
-	dropped atomic.Int64
+	ch        chan Event
+	mu        sync.RWMutex
+	closed    bool
+	wg        sync.WaitGroup
+	dropped   atomic.Int64
+	delivered atomic.Int64
+	failed    atomic.Int64
 }
 
 // NewWebhookDispatcher creates a WebhookDispatcher with a bounded queue and starts its worker goroutine.
@@ -68,10 +74,12 @@ func NewWebhookDispatcher(endpoint, secret string, bufferSize int) *WebhookDispa
 		bufferSize = defaultBufSize
 	}
 	d := &WebhookDispatcher{
-		endpoint: endpoint,
-		secret:   secret,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		ch:       make(chan Event, bufferSize),
+		endpoint:    endpoint,
+		secret:      secret,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		maxRetries:  defaultMaxRetries,
+		backoffBase: defaultBackoff,
+		ch:          make(chan Event, bufferSize),
 	}
 	d.wg.Add(1)
 	go d.worker()
@@ -83,6 +91,19 @@ func (d *WebhookDispatcher) WithHTTPClient(client *http.Client) *WebhookDispatch
 	if client != nil {
 		d.client = client
 	}
+	return d
+}
+
+// WithRetry configures the maximum number of retry attempts and base exponential backoff duration.
+func (d *WebhookDispatcher) WithRetry(maxRetries int, backoffBase time.Duration) *WebhookDispatcher {
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	if backoffBase < 0 {
+		backoffBase = 0
+	}
+	d.maxRetries = maxRetries
+	d.backoffBase = backoffBase
 	return d
 }
 
@@ -107,6 +128,16 @@ func (d *WebhookDispatcher) Emit(evt Event) {
 // DroppedCount returns the number of events dropped due to a full queue or post-close emission.
 func (d *WebhookDispatcher) DroppedCount() int64 {
 	return d.dropped.Load()
+}
+
+// DeliveredCount returns the number of events successfully delivered with a 2xx HTTP response.
+func (d *WebhookDispatcher) DeliveredCount() int64 {
+	return d.delivered.Load()
+}
+
+// FailedCount returns the number of events that permanently failed delivery.
+func (d *WebhookDispatcher) FailedCount() int64 {
+	return d.failed.Load()
 }
 
 // Close stops accepting new events, drains the buffered queue, and waits for the worker to exit.
@@ -137,21 +168,41 @@ func (d *WebhookDispatcher) deliver(evt Event) {
 
 	payload, err := json.Marshal(evt)
 	if err != nil {
+		d.failed.Add(1)
 		return
+	}
+	sig := signPayload(d.secret, payload)
+
+	for attempt := 0; attempt <= d.maxRetries; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, d.endpoint, bytes.NewReader(payload))
+		if err != nil {
+			d.failed.Add(1)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(SignatureHeader, sig)
+
+		resp, err := d.client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				d.delivered.Add(1)
+				return
+			}
+			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < http.StatusInternalServerError {
+				d.failed.Add(1)
+				return
+			}
+		}
+
+		if attempt < d.maxRetries && d.backoffBase > 0 {
+			if backoff := d.backoffBase << attempt; backoff > 0 {
+				time.Sleep(backoff)
+			}
+		}
 	}
 
-	req, err := http.NewRequest(http.MethodPost, d.endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(SignatureHeader, signPayload(d.secret, payload))
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
+	d.failed.Add(1)
 }
 
 func signPayload(secret string, payload []byte) string {

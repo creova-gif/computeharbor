@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +47,7 @@ class ControlPlaneClient:
         timeout_sec: float = 5.0,
         max_retries: int = 3,
         backoff_base_sec: float = 0.05,
+        api_key: str | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -56,6 +58,9 @@ class ControlPlaneClient:
         self.timeout_sec = timeout_sec
         self.max_retries = max_retries
         self.backoff_base_sec = backoff_base_sec
+        self.api_key: str | None = (
+            api_key if api_key is not None else os.environ.get("COMPUTEHARBOR_API_KEY")
+        )
 
     def _request(
         self,
@@ -68,6 +73,8 @@ class ControlPlaneClient:
         url = f"{self.base_url}{path}"
         data: bytes | None = None
         headers: dict[str, str] = {"Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         if include_org_header:
             headers["X-Org-ID"] = self.org_id
         if payload is not None:

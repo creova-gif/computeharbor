@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -8,7 +9,11 @@ import (
 	"time"
 )
 
-const defaultOrgID = "anonymous"
+const (
+	defaultOrgID  = "anonymous"
+	maxBuckets    = 10000
+	bucketIdleTTL = 10 * time.Minute
+)
 
 // statusRecorder wraps http.ResponseWriter to capture the HTTP status code
 // written by downstream handlers.
@@ -113,17 +118,22 @@ func (l *OrgRateLimiter) Allow(orgID string) bool {
 	now := l.now()
 	b, ok := l.buckets[orgID]
 	if !ok {
+		if len(l.buckets) >= maxBuckets {
+			l.evict(now)
+		}
 		b = &tokenBucket{
 			tokens: float64(l.burst),
 			last:   now,
 		}
 		l.buckets[orgID] = b
-	} else if l.rps > 0 {
-		elapsed := now.Sub(b.last).Seconds()
-		if elapsed > 0 {
-			b.tokens = min(float64(l.burst), b.tokens+elapsed*l.rps)
-			b.last = now
+	} else {
+		if l.rps > 0 {
+			elapsed := now.Sub(b.last).Seconds()
+			if elapsed > 0 {
+				b.tokens = min(float64(l.burst), b.tokens+elapsed*l.rps)
+			}
 		}
+		b.last = now
 	}
 
 	if b.tokens < 1.0 {
@@ -131,6 +141,52 @@ func (l *OrgRateLimiter) Allow(orgID string) bool {
 	}
 	b.tokens -= 1.0
 	return true
+}
+
+func (l *OrgRateLimiter) evict(now time.Time) {
+	for id, b := range l.buckets {
+		if now.Sub(b.last) >= bucketIdleTTL {
+			delete(l.buckets, id)
+		}
+	}
+	if len(l.buckets) < maxBuckets {
+		return
+	}
+
+	var oldestID string
+	var oldestTime time.Time
+	first := true
+	for id, b := range l.buckets {
+		if first || b.last.Before(oldestTime) {
+			oldestID = id
+			oldestTime = b.last
+			first = false
+		}
+	}
+	if !first {
+		delete(l.buckets, oldestID)
+	}
+}
+
+// BearerAuthMiddleware enforces constant-time Bearer token authentication when
+// apiKey is non-empty, skipping GET /healthz and GET /ui for probes and console access.
+func BearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
+	if apiKey == "" {
+		return next
+	}
+	expected := []byte(apiKey)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/ui") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(token), expected) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Middleware wraps next and rejects requests with 429 Too Many Requests and

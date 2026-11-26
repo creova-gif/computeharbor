@@ -24,6 +24,7 @@ type Server struct {
 	mux     *http.ServeMux
 	logger  *slog.Logger
 	limiter *OrgRateLimiter
+	apiKey  string
 }
 
 // New constructs a Server wrapping the provided Coordinator.
@@ -52,11 +53,20 @@ func (s *Server) WithRateLimit(rps float64, burst int) *Server {
 	return s
 }
 
+// WithAPIKey configures optional Bearer token authentication on the Server.
+func (s *Server) WithAPIKey(token string) *Server {
+	s.apiKey = token
+	return s
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var handler http.Handler = s.mux
 	if s.limiter != nil {
 		handler = s.limiter.Middleware(handler)
+	}
+	if s.apiKey != "" {
+		handler = BearerAuthMiddleware(s.apiKey, handler)
 	}
 	if s.logger != nil {
 		handler = LoggingMiddleware(s.logger, handler)

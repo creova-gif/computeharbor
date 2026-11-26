@@ -437,3 +437,197 @@ func TestLoggingMiddlewareIncludesRequestID(t *testing.T) {
 		t.Fatalf("expected request_id corr-id-42, got %v", got)
 	}
 }
+
+func TestScopedBearerAuthMiddleware(t *testing.T) {
+	orgKeys := map[string]string{
+		"tok-alpha": "org-alpha",
+		"tok-beta":  "org-beta",
+	}
+
+	t.Run("empty adminKey and orgKeys is a no-op", func(t *testing.T) {
+		handler := server.ScopedBearerAuthMiddleware("", nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+	})
+
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		authHeader string
+		orgHeader  string
+		wantStatus int
+		wantOrg    string
+		wantErr    string
+	}{
+		{
+			name:       "missing token returns 401",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			wantStatus: http.StatusUnauthorized,
+			wantErr:    "unauthorized",
+		},
+		{
+			name:       "invalid token returns 401",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer invalid-tok",
+			wantStatus: http.StatusUnauthorized,
+			wantErr:    "unauthorized",
+		},
+		{
+			name:       "org token succeeds with matching X-Org-ID",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer tok-alpha",
+			orgHeader:  "org-alpha",
+			wantStatus: http.StatusOK,
+			wantOrg:    "org-alpha",
+		},
+		{
+			name:       "org token injects X-Org-ID when omitted",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer tok-alpha",
+			wantStatus: http.StatusOK,
+			wantOrg:    "org-alpha",
+		},
+		{
+			name:       "org token injects X-Org-ID when whitespace",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer tok-beta",
+			orgHeader:  "   ",
+			wantStatus: http.StatusOK,
+			wantOrg:    "org-beta",
+		},
+		{
+			name:       "org token returns 403 when X-Org-ID targets another org",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer tok-alpha",
+			orgHeader:  "org-beta",
+			wantStatus: http.StatusForbidden,
+			wantErr:    "org token does not match X-Org-ID",
+		},
+		{
+			name:       "admin apiKey accesses org-alpha",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer admin-secret",
+			orgHeader:  "org-alpha",
+			wantStatus: http.StatusOK,
+			wantOrg:    "org-alpha",
+		},
+		{
+			name:       "admin apiKey accesses org-beta",
+			method:     http.MethodGet,
+			path:       "/v1/jobs",
+			authHeader: "Bearer admin-secret",
+			orgHeader:  "org-beta",
+			wantStatus: http.StatusOK,
+			wantOrg:    "org-beta",
+		},
+		{
+			name:       "GET /healthz bypasses scoped auth",
+			method:     http.MethodGet,
+			path:       "/healthz",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotOrg string
+			handler := server.ScopedBearerAuthMiddleware("admin-secret", orgKeys, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotOrg = r.Header.Get("X-Org-ID")
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.authHeader != "" {
+				req.Header.Set("Authorization", tc.authHeader)
+			}
+			if tc.orgHeader != "" {
+				req.Header.Set("X-Org-ID", tc.orgHeader)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d (body: %s)", tc.wantStatus, rec.Code, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK && tc.wantOrg != "" && gotOrg != tc.wantOrg {
+				t.Fatalf("expected downstream X-Org-ID %q, got %q", tc.wantOrg, gotOrg)
+			}
+			if tc.wantErr != "" {
+				var body map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+					t.Fatalf("unmarshal error body: %v", err)
+				}
+				if body["error"] != tc.wantErr {
+					t.Fatalf("expected error %q, got %q", tc.wantErr, body["error"])
+				}
+			}
+		})
+	}
+}
+
+func TestServerWithOrgAPIKeysAndRateLimit(t *testing.T) {
+	keys := map[string]string{
+		"tok-org1": "org-1",
+		"":         "ignored-empty-tok",
+		"ignored":  "",
+	}
+	srv := server.New(orchestrator.NewCoordinator()).
+		WithAPIKey("admin-key").
+		WithOrgAPIKeys(keys).
+		WithRateLimit(0.01, 1)
+
+	// Mutating caller map must not affect server's defensive copy.
+	keys["tok-org1"] = "org-hijacked"
+
+	// Request with org-1 token and no X-Org-ID should inject org-1 and succeed.
+	req1 := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req1.Header.Set("Authorization", "Bearer tok-org1")
+	rec1 := httptest.NewRecorder()
+	srv.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 for first org-1 request, got %d (%s)", rec1.Code, rec1.Body.String())
+	}
+
+	// Second request with org-1 token should be rate-limited under org-1 bucket.
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req2.Header.Set("Authorization", "Bearer tok-org1")
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 for second org-1 request, got %d", rec2.Code)
+	}
+
+	// Cross-org X-Org-ID returns 403.
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req3.Header.Set("Authorization", "Bearer tok-org1")
+	req3.Header.Set("X-Org-ID", "org-2")
+	rec3 := httptest.NewRecorder()
+	srv.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for mismatched X-Org-ID, got %d", rec3.Code)
+	}
+
+	// Admin key can access org-2.
+	req4 := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req4.Header.Set("Authorization", "Bearer admin-key")
+	req4.Header.Set("X-Org-ID", "org-2")
+	rec4 := httptest.NewRecorder()
+	srv.ServeHTTP(rec4, req4)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("expected 200 for admin key on org-2, got %d", rec4.Code)
+	}
+}

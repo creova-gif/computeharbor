@@ -34,6 +34,7 @@ type Server struct {
 	logger       *slog.Logger
 	limiter      *OrgRateLimiter
 	apiKey       string
+	orgAPIKeys   map[string]string
 	webhookStats WebhookStats
 	draining     atomic.Bool
 	httpMetrics  *httpMetrics
@@ -75,6 +76,28 @@ func (s *Server) WithAPIKey(token string) *Server {
 	return s
 }
 
+// WithOrgAPIKeys configures org-scoped Bearer token authentication on the Server
+// using a defensive copy of token -> org_id mappings (ignoring empty keys or orgs).
+func (s *Server) WithOrgAPIKeys(keys map[string]string) *Server {
+	if len(keys) == 0 {
+		s.orgAPIKeys = nil
+		return s
+	}
+	copied := make(map[string]string, len(keys))
+	for tok, org := range keys {
+		if tok == "" || org == "" {
+			continue
+		}
+		copied[tok] = org
+	}
+	if len(copied) == 0 {
+		s.orgAPIKeys = nil
+		return s
+	}
+	s.orgAPIKeys = copied
+	return s
+}
+
 // WithWebhookStats configures webhook delivery metrics reporting on the Server.
 func (s *Server) WithWebhookStats(stats WebhookStats) *Server {
 	s.webhookStats = stats
@@ -98,8 +121,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.limiter != nil {
 		handler = s.limiter.Middleware(handler)
 	}
-	if s.apiKey != "" {
-		handler = BearerAuthMiddleware(s.apiKey, handler)
+	if s.apiKey != "" || len(s.orgAPIKeys) > 0 {
+		handler = ScopedBearerAuthMiddleware(s.apiKey, s.orgAPIKeys, handler)
 	}
 	if s.logger != nil {
 		handler = LoggingMiddleware(s.logger, handler)

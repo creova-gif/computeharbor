@@ -227,26 +227,68 @@ func (l *OrgRateLimiter) evict(now time.Time) {
 	}
 }
 
-// BearerAuthMiddleware enforces constant-time Bearer token authentication when
-// apiKey is non-empty, skipping GET /healthz, GET /readyz, and GET /ui for
-// probes and console access.
-func BearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
-	if apiKey == "" {
+type orgKeyEntry struct {
+	token []byte
+	orgID string
+}
+
+// ScopedBearerAuthMiddleware enforces constant-time Bearer token authentication
+// with support for a global adminKey and org-scoped tokens (token -> org_id).
+// When both adminKey and orgKeys are empty, it is a no-op. GET /healthz,
+// GET /readyz, and GET /ui bypass auth for probes and console access.
+func ScopedBearerAuthMiddleware(adminKey string, orgKeys map[string]string, next http.Handler) http.Handler {
+	if adminKey == "" && len(orgKeys) == 0 {
 		return next
 	}
-	expected := []byte(apiKey)
+	adminBytes := []byte(adminKey)
+	entries := make([]orgKeyEntry, 0, len(orgKeys))
+	for tok, org := range orgKeys {
+		if tok == "" || org == "" {
+			continue
+		}
+		entries = append(entries, orgKeyEntry{
+			token: []byte(tok),
+			orgID: org,
+		})
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/ui") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || subtle.ConstantTimeCompare([]byte(token), expected) != 1 {
+		if !ok || token == "" {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next.ServeHTTP(w, r)
+		tokenBytes := []byte(token)
+		if adminKey != "" && subtle.ConstantTimeCompare(tokenBytes, adminBytes) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		for _, entry := range entries {
+			if subtle.ConstantTimeCompare(tokenBytes, entry.token) == 1 {
+				reqOrg := strings.TrimSpace(r.Header.Get("X-Org-ID"))
+				if reqOrg != "" && reqOrg != entry.orgID {
+					writeError(w, http.StatusForbidden, "org token does not match X-Org-ID")
+					return
+				}
+				cloned := r.Clone(r.Context())
+				cloned.Header.Set("X-Org-ID", entry.orgID)
+				next.ServeHTTP(w, cloned)
+				return
+			}
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 	})
+}
+
+// BearerAuthMiddleware enforces constant-time Bearer token authentication when
+// apiKey is non-empty, skipping GET /healthz, GET /readyz, and GET /ui for
+// probes and console access.
+func BearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
+	return ScopedBearerAuthMiddleware(apiKey, nil, next)
 }
 
 // Middleware wraps next and rejects requests with 429 Too Many Requests and

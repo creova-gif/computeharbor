@@ -1,10 +1,30 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
+
+_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_transient_http_status(status_code: int) -> bool:
+    return status_code in _TRANSIENT_STATUS_CODES or 500 <= status_code < 600
+
+
+def _parse_retry_after(exc: urllib.error.HTTPError) -> float | None:
+    if exc.headers is None:
+        return None
+    raw = exc.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        delay = float(str(raw).strip())
+    except ValueError:
+        return None
+    return max(0.0, delay)
 
 
 class ControlPlaneError(RuntimeError):
@@ -24,10 +44,18 @@ class ControlPlaneClient:
         base_url: str,
         org_id: str,
         timeout_sec: float = 5.0,
+        max_retries: int = 3,
+        backoff_base_sec: float = 0.05,
     ) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        if backoff_base_sec < 0:
+            raise ValueError("backoff_base_sec must be >= 0")
         self.base_url = base_url.rstrip("/")
         self.org_id = org_id
         self.timeout_sec = timeout_sec
+        self.max_retries = max_retries
+        self.backoff_base_sec = backoff_base_sec
 
     def _request(
         self,
@@ -46,18 +74,42 @@ class ControlPlaneClient:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                raw = resp.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")
+        raw = ""
+        for attempt in range(self.max_retries + 1):
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
-                parsed = json.loads(err_body)
-                msg = str(parsed.get("error", err_body)) if isinstance(parsed, dict) else err_body
-            except json.JSONDecodeError:
-                msg = err_body
-            raise ControlPlaneError(exc.code, msg) from exc
+                with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                    raw = resp.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    parsed = json.loads(err_body)
+                    msg = (
+                        str(parsed.get("error", err_body))
+                        if isinstance(parsed, dict)
+                        else err_body
+                    )
+                except json.JSONDecodeError:
+                    msg = err_body
+
+                if not _is_transient_http_status(exc.code) or attempt >= self.max_retries:
+                    raise ControlPlaneError(exc.code, msg) from exc
+
+                retry_after = _parse_retry_after(exc)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else self.backoff_base_sec * (2**attempt)
+                )
+                if delay > 0:
+                    time.sleep(delay)
+            except urllib.error.URLError:
+                if attempt >= self.max_retries:
+                    raise
+                delay = self.backoff_base_sec * (2**attempt)
+                if delay > 0:
+                    time.sleep(delay)
 
         if not raw:
             return {}

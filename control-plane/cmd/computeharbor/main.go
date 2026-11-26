@@ -76,6 +76,7 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	addr := fs.String("addr", ":8080", "HTTP listen address")
 	reapInterval := fs.Duration("reap-interval", 5*time.Second, "Background stale-lease reaper interval")
 	leaseTTL := fs.Duration("lease-ttl", 30*time.Second, "Worker heartbeat lease TTL before preemption")
+	stateFile := fs.String("state-file", "", "Optional path to persist coordinator JSON snapshot")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -84,11 +85,20 @@ func runServe(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return serveListener(ctx, ln, out, *reapInterval, *leaseTTL)
+	return serveListener(ctx, ln, out, *reapInterval, *leaseTTL, *stateFile)
 }
 
-func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInterval, leaseTTL time.Duration) error {
-	api := server.New(orchestrator.NewCoordinator())
+func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInterval, leaseTTL time.Duration, stateFile string) error {
+	coord := orchestrator.NewCoordinator()
+	if stateFile != "" {
+		var err error
+		coord, err = orchestrator.LoadCoordinatorFromFile(stateFile)
+		if err != nil {
+			return fmt.Errorf("load coordinator state: %w", err)
+		}
+	}
+
+	api := server.New(coord)
 	reaperCtx, cancelReaper := context.WithCancel(ctx)
 	defer cancelReaper()
 	reaperDone := api.StartReaper(reaperCtx, reapInterval, leaseTTL)
@@ -109,10 +119,9 @@ func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInte
 	case err := <-errCh:
 		cancelReaper()
 		<-reaperDone
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
-		return err
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -124,9 +133,15 @@ func serveListener(ctx context.Context, ln net.Listener, out io.Writer, reapInte
 		err := <-errCh
 		cancelReaper()
 		<-reaperDone
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
-		return err
 	}
+
+	if stateFile != "" {
+		if err := coord.SaveSnapshot(stateFile); err != nil {
+			return fmt.Errorf("save coordinator state: %w", err)
+		}
+	}
+	return nil
 }

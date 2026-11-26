@@ -57,7 +57,8 @@ const uiHTML = `<!DOCTYPE html>
     gap: 10px;
   }
   label { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
-  input[type="text"] {
+  input[type="text"],
+  input[type="password"] {
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
@@ -66,7 +67,8 @@ const uiHTML = `<!DOCTYPE html>
     font-size: 0.875rem;
     min-width: 160px;
   }
-  input[type="text"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input[type="text"]:focus,
+  input[type="password"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   button {
     background: var(--accent);
     color: #082f49;
@@ -153,6 +155,18 @@ const uiHTML = `<!DOCTYPE html>
   }
   .empty { padding: 20px 18px; color: var(--muted); font-size: 0.875rem; }
   .error-text { color: var(--red); }
+  .auth-banner {
+    display: none;
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    color: #fecaca;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 18px;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .auth-banner.visible { display: block; }
 </style>
 </head>
 <body>
@@ -166,9 +180,13 @@ const uiHTML = `<!DOCTYPE html>
       <span id="health-badge" class="badge">Checking...</span>
       <label for="org-id">X-Org-ID</label>
       <input id="org-id" type="text" value="org-demo" autocomplete="off">
+      <label for="apiKeyInput">API Key</label>
+      <input id="apiKeyInput" type="password" placeholder="Optional Bearer API key" autocomplete="off">
       <button id="refresh-btn" type="button">Refresh</button>
     </div>
   </header>
+
+  <div id="auth-error-banner" class="auth-banner" role="alert">API key required or invalid</div>
 
   <section class="kpi-grid">
     <div class="card">
@@ -221,8 +239,62 @@ const uiHTML = `<!DOCTYPE html>
 <script>
 (function () {
   var orgInput = document.getElementById("org-id");
+  var apiKeyInput = document.getElementById("apiKeyInput");
+  var authBanner = document.getElementById("auth-error-banner");
   var refreshBtn = document.getElementById("refresh-btn");
   var healthBadge = document.getElementById("health-badge");
+  var API_KEY_STORAGE_KEY = "ch_api_key";
+
+  try {
+    var savedKey = sessionStorage.getItem(API_KEY_STORAGE_KEY);
+    if (savedKey) {
+      apiKeyInput.value = savedKey;
+    }
+  } catch (e) {}
+
+  function persistApiKey() {
+    try {
+      var val = (apiKeyInput.value || "").trim();
+      if (val) {
+        sessionStorage.setItem(API_KEY_STORAGE_KEY, val);
+      } else {
+        sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+      }
+    } catch (e) {}
+  }
+
+  function buildHeaders(extra) {
+    var headers = {};
+    if (extra) {
+      Object.keys(extra).forEach(function (k) { headers[k] = extra[k]; });
+    }
+    var token = (apiKeyInput.value || "").trim();
+    if (token) {
+      headers["Authorization"] = "Bearer " + token;
+    }
+    return headers;
+  }
+
+  function showAuthError() {
+    authBanner.textContent = "API key required or invalid";
+    authBanner.className = "auth-banner visible";
+  }
+
+  function clearAuthError() {
+    authBanner.className = "auth-banner";
+  }
+
+  async function fetchJSON(url, extraHeaders) {
+    var res = await fetch(url, { headers: buildHeaders(extraHeaders) });
+    if (res.status === 401) {
+      showAuthError();
+    }
+    var data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || ("HTTP " + res.status));
+    }
+    return data;
+  }
 
   function usd(v) {
     return "$" + Number(v || 0).toFixed(2);
@@ -271,7 +343,10 @@ const uiHTML = `<!DOCTYPE html>
 
   async function fetchHealth() {
     try {
-      var res = await fetch("/healthz");
+      var res = await fetch("/healthz", { headers: buildHeaders() });
+      if (res.status === 401) {
+        showAuthError();
+      }
       var data = await res.json();
       if (res.ok && data.status === "ok") {
         healthBadge.textContent = "Health: OK";
@@ -292,11 +367,7 @@ const uiHTML = `<!DOCTYPE html>
     var spendEl = document.getElementById("kpi-spend");
     var spendSub = document.getElementById("kpi-spend-sub");
     try {
-      var res = await fetch("/v1/billing/summary", { headers: { "X-Org-ID": orgId } });
-      var data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || ("HTTP " + res.status));
-      }
+      var data = await fetchJSON("/v1/billing/summary", { "X-Org-ID": orgId });
       savingsEl.textContent = usd(data.net_savings_usd);
       savingsSub.textContent = pct(data.net_savings_fraction) + " net savings (" + usd(data.platform_fee_usd) + " fee)";
       spendEl.textContent = usd(data.estimated_spot_usd);
@@ -317,11 +388,7 @@ const uiHTML = `<!DOCTYPE html>
     var topPool = document.getElementById("kpi-top-pool");
     var topPoolSub = document.getElementById("kpi-top-pool-sub");
     try {
-      var res = await fetch("/v1/fleet/rank?min_vram=24");
-      var data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || ("HTTP " + res.status));
-      }
+      var data = await fetchJSON("/v1/fleet/rank?min_vram=24");
       if (!Array.isArray(data) || data.length === 0) {
         topPool.textContent = "None";
         topPoolSub.textContent = "No matching pools";
@@ -363,11 +430,7 @@ const uiHTML = `<!DOCTYPE html>
   async function fetchJobs(orgId) {
     var container = document.getElementById("jobs-body");
     try {
-      var res = await fetch("/v1/jobs", { headers: { "X-Org-ID": orgId } });
-      var data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || ("HTTP " + res.status));
-      }
+      var data = await fetchJSON("/v1/jobs", { "X-Org-ID": orgId });
       if (!Array.isArray(data) || data.length === 0) {
         clearAndMsg(container, "No jobs found for organization " + orgId + ".", false);
         return;
@@ -401,7 +464,10 @@ const uiHTML = `<!DOCTYPE html>
   async function fetchMetrics() {
     var pre = document.getElementById("metrics-body");
     try {
-      var res = await fetch("/metrics");
+      var res = await fetch("/metrics", { headers: buildHeaders() });
+      if (res.status === 401) {
+        showAuthError();
+      }
       var text = await res.text();
       if (!res.ok) {
         throw new Error("HTTP " + res.status);
@@ -415,6 +481,8 @@ const uiHTML = `<!DOCTYPE html>
   async function refreshAll() {
     var orgId = (orgInput.value || "").trim() || "org-demo";
     orgInput.value = orgId;
+    persistApiKey();
+    clearAuthError();
     refreshBtn.disabled = true;
     try {
       await Promise.all([
@@ -431,6 +499,10 @@ const uiHTML = `<!DOCTYPE html>
 
   refreshBtn.addEventListener("click", refreshAll);
   orgInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") refreshAll();
+  });
+  apiKeyInput.addEventListener("input", persistApiKey);
+  apiKeyInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter") refreshAll();
   });
   refreshAll();

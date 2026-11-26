@@ -142,3 +142,28 @@ class ControlPlaneClient:
     def get_job(self, job_id: str) -> dict[str, Any]:
         """Fetch current lease state for a job."""
         return self._request("GET", f"/v1/jobs/{job_id}")
+
+    def schedule(
+        self,
+        *,
+        min_vram_gb: int,
+        gpu_count: int,
+        active_hours: float,
+        fee_fraction: float = 0.12,
+        exclude_gpus: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Select the best eligible spot GPU pool via POST /v1/schedule."""
+        payload: dict[str, Any] = {
+            "min_vram_gb": min_vram_gb,
+            "gpu_count": gpu_count,
+            "active_hours": active_hours,
+            "fee_fraction": fee_fraction,
+        }
+        if exclude_gpus is not None:
+            payload["exclude_gpus"] = exclude_gpus
+        return self._request(
+            "POST",
+            "/v1/schedule",
+            payload=payload,
+            include_org_header=False,
+        )

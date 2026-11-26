@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 import threading
 from pathlib import Path
 
 from computeharbor_worker.client import ControlPlaneClient, ControlPlaneError
 from computeharbor_worker.models import LoRAConfig
+from computeharbor_worker.preemption import MetadataPreemptionWatcher, MetadataProvider
 from computeharbor_worker.storage import CheckpointStore, LocalMirrorObjectStore
 from computeharbor_worker.trainer import LoRATrainer, RunResult
 
@@ -39,6 +42,9 @@ def run_worker_daemon(
     ready_file: Path | None = None,
     remote_store: CheckpointStore | None = None,
     config: LoRAConfig | None = None,
+    metadata_provider: MetadataProvider | None = None,
+    metadata_url: str | None = None,
+    metadata_poll_sec: float = 0.5,
 ) -> RunResult:
     """Assign this worker to a job, stream heartbeats, train, and commit checkpoints."""
     ckpt_dir = Path(checkpoint_dir)
@@ -53,6 +59,16 @@ def run_worker_daemon(
     )
     hb_thread.start()
 
+    watcher: MetadataPreemptionWatcher | None = None
+    if metadata_provider is not None:
+        watcher = MetadataPreemptionWatcher(
+            provider=metadata_provider,
+            metadata_url=metadata_url,
+            poll_interval_sec=metadata_poll_sec,
+            on_preempt=lambda: os.kill(os.getpid(), signal.SIGTERM),
+        )
+        watcher.start()
+
     try:
         trainer = LoRATrainer(
             job_id=job_id,
@@ -66,6 +82,8 @@ def run_worker_daemon(
             ready_file=ready_file,
         )
     finally:
+        if watcher is not None:
+            watcher.stop()
         stop_event.set()
         hb_thread.join(timeout=max(1.0, heartbeat_interval_sec * 2.0))
 
@@ -105,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ready-file", default="")
     parser.add_argument("--summary-out", default="")
     parser.add_argument("--remote-store-dir", default="")
+    parser.add_argument("--metadata-provider", choices=["gcp", "aws"], default=None)
+    parser.add_argument("--metadata-url", default=None)
+    parser.add_argument("--metadata-poll-sec", type=float, default=0.5)
     args = parser.parse_args(argv)
 
     remote_store: CheckpointStore | None = (
@@ -122,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         step_delay_sec=args.step_delay_sec,
         ready_file=ready_path,
         remote_store=remote_store,
+        metadata_provider=args.metadata_provider,
+        metadata_url=args.metadata_url,
+        metadata_poll_sec=args.metadata_poll_sec,
     )
     output_json = result.summary.model_dump_json(indent=2)
     if args.summary_out:

@@ -2,6 +2,7 @@ from computeharbor_worker.checkpoint import CheckpointManager
 from computeharbor_worker.client import ControlPlaneClient, ControlPlaneError
 from computeharbor_worker.daemon import run_worker_daemon
 from computeharbor_worker.models import CheckpointManifest, LoRAConfig, RNGStatePayload
+from computeharbor_worker.preemption import MetadataPreemptionWatcher, MetadataProvider
 from computeharbor_worker.storage import (
     CheckpointStore,
     HTTPPresignedStore,
@@ -21,6 +22,8 @@ __all__ = [
     "LoRAConfig",
     "LoRATrainer",
     "LocalMirrorObjectStore",
+    "MetadataPreemptionWatcher",
+    "MetadataProvider",
     "RNGStatePayload",
     "RunResult",
     "cuda_synchronize_if_available",

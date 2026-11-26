@@ -79,6 +79,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/jobs/{id}/sigterm", s.handleNotifySIGTERM)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/checkpoint", s.handleCommitCheckpoint)
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
+	s.mux.HandleFunc("POST /v1/schedule", s.handleSchedule)
 }
 
 type errorResponse struct {

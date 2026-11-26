@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go 1.23+](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](go.mod)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB.svg)](pyproject.toml)
-[![Release](https://img.shields.io/badge/Release-v0.2.0-green.svg)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.2.1-green.svg)](CHANGELOG.md)
 
 ComputeHarbor orchestrates LoRA fine-tuning and batch inference across preemptible spot GPU pools. When a provider sends `SIGTERM` for a 30-second spot eviction, the worker flushes only the mutable LoRA adapter matrices, AdamW moment buffers, and PRNG state in Safetensors format via an atomic write-and-rename commit.
 

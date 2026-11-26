@@ -4,6 +4,7 @@ import importlib
 import random
 import sys
 import threading
+import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -252,6 +253,148 @@ def test_http_presigned_store_validation_and_errors(tmp_path: Path) -> None:
 
         with pytest.raises(FileNotFoundError):
             store.get_file("missing/key.bin", tmp_path / "out.bin")
+
+
+def test_http_presigned_store_round_trip_and_exists(tmp_path: Path) -> None:
+    with _in_memory_object_http_server() as base_url:
+        store = HTTPPresignedStore(base_url)
+        src = tmp_path / "model.safetensors"
+        payload = bytes(range(256)) * 8
+        src.write_bytes(payload)
+
+        key = "job-contract-1/step-000042.safetensors"
+        assert store.exists(key) is False
+
+        uri = store.put_file(src, key)
+        assert uri == f"{base_url}/{key}"
+        assert store.exists(key) is True
+
+        dest = tmp_path / "restored" / "model.safetensors"
+        store.get_file(key, dest)
+        assert dest.read_bytes() == payload
+        assert store.exists("job-contract-1/does-not-exist.safetensors") is False
+
+
+def test_http_presigned_store_retries_transient_503(tmp_path: Path) -> None:
+    objects: dict[str, bytes] = {}
+    counts: dict[str, int] = {"PUT": 0, "GET": 0, "HEAD": 0}
+    lock = threading.Lock()
+
+    class _FlakyHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_PUT(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            with lock:
+                counts["PUT"] += 1
+                attempt = counts["PUT"]
+                if self.path.endswith("/forbidden.bin"):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                if attempt <= 2:
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                objects[self.path] = body
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            with lock:
+                counts["GET"] += 1
+                attempt = counts["GET"]
+                if self.path.endswith("/forbidden.bin"):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                if attempt <= 2:
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                payload = objects.get(self.path)
+            if payload is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_HEAD(self) -> None:
+            with lock:
+                counts["HEAD"] += 1
+                found = self.path in objects
+            self.send_response(200 if found else 404)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FlakyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, port = server.server_address[:2]
+        store = HTTPPresignedStore(
+            f"http://127.0.0.1:{port}/presigned",
+            max_retries=3,
+            backoff_base_sec=0.0,
+        )
+
+        src = tmp_path / "ckpt.bin"
+        payload = b"retry-contract-payload"
+        src.write_bytes(payload)
+
+        uri = store.put_file(src, "job-retry/ckpt.bin")
+        assert uri.endswith("/job-retry/ckpt.bin")
+        assert counts["PUT"] == 3
+
+        dest = tmp_path / "ckpt_out.bin"
+        store.get_file("job-retry/ckpt.bin", dest)
+        assert dest.read_bytes() == payload
+        assert counts["GET"] == 3
+
+        counts["PUT"] = 0
+        with pytest.raises(urllib.error.HTTPError) as put_exc:
+            store.put_file(src, "job-retry/forbidden.bin")
+        assert put_exc.value.code == 403
+        assert counts["PUT"] == 1
+
+        counts["GET"] = 0
+        with pytest.raises(urllib.error.HTTPError) as get_exc:
+            store.get_file("job-retry/forbidden.bin", dest)
+        assert get_exc.value.code == 403
+        assert counts["GET"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def test_http_presigned_store_rejects_invalid_url_and_traversal(tmp_path: Path) -> None:
+    for bad_url in ("ftp://example.com/bucket", "file:///tmp/bucket", "/relative/path", ""):
+        with pytest.raises(ValueError, match="Invalid HTTP store base_url"):
+            HTTPPresignedStore(bad_url)
+
+    with pytest.raises(ValueError, match="max_retries"):
+        HTTPPresignedStore("http://127.0.0.1:8080/bucket", max_retries=-1)
+
+    with pytest.raises(ValueError, match="backoff_base_sec"):
+        HTTPPresignedStore("http://127.0.0.1:8080/bucket", backoff_base_sec=-0.1)
+
+    store = HTTPPresignedStore("http://127.0.0.1:8080/bucket")
+    src = tmp_path / "data.bin"
+    src.write_bytes(b"payload")
+
+    for bad_key in ("../secret.bin", "job/../../escape.bin"):
+        with pytest.raises(ValueError, match="Invalid object key"):
+            store.put_file(src, bad_key)
+        with pytest.raises(ValueError, match="Invalid object key"):
+            store.get_file(bad_key, tmp_path / "out.bin")
+        with pytest.raises(ValueError, match="Invalid object key"):
+            store.exists(bad_key)
 
 
 def test_store_from_uri_routing(tmp_path: Path) -> None:

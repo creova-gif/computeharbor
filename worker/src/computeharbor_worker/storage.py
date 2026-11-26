@@ -3,11 +3,15 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
+
+_T = TypeVar("_T")
 
 
 @runtime_checkable
@@ -88,13 +92,54 @@ class LocalMirrorObjectStore:
 class HTTPPresignedStore:
     """HTTP presigned or gateway object-store client using stdlib urllib."""
 
-    def __init__(self, base_url: str, timeout_sec: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_sec: float = 10.0,
+        max_retries: int = 3,
+        backoff_base_sec: float = 0.05,
+    ) -> None:
         normalized = base_url.rstrip("/")
         parsed = urllib.parse.urlparse(normalized)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError(f"Invalid HTTP store base_url: {base_url!r}")
+        if max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        if backoff_base_sec < 0.0:
+            raise ValueError(f"backoff_base_sec must be >= 0.0, got {backoff_base_sec}")
         self.base_url = normalized
         self.timeout_sec = timeout_sec
+        self.max_retries = max_retries
+        self.backoff_base_sec = backoff_base_sec
+
+    @staticmethod
+    def _is_retryable_http_status(code: int) -> bool:
+        return code == 429 or 500 <= code < 600
+
+    def _request_with_retry(
+        self,
+        req: urllib.request.Request,
+        on_response: Callable[[Any], _T],
+    ) -> _T:
+        """Execute *req* with bounded exponential backoff on transient failures."""
+        last_exc: BaseException | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                    return on_response(resp)
+            except urllib.error.HTTPError as exc:
+                if not self._is_retryable_http_status(exc.code) or attempt >= self.max_retries:
+                    raise
+                last_exc = exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt >= self.max_retries:
+                    raise
+                last_exc = exc
+            delay = self.backoff_base_sec * (2**attempt)
+            if delay > 0.0:
+                time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     def _object_url(self, key: str) -> str:
         clean_key = _validate_object_key(key)
@@ -115,16 +160,17 @@ class HTTPPresignedStore:
                 "Content-Length": str(len(payload)),
             },
         )
-        with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-            resp.read()
+        self._request_with_retry(req, lambda resp: resp.read())
         return url
 
     def get_file(self, key: str, dest_path: Path) -> None:
         url = self._object_url(key)
         req = urllib.request.Request(url, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                _atomic_write_from_stream(resp, dest_path)
+            self._request_with_retry(
+                req,
+                lambda resp: _atomic_write_from_stream(resp, dest_path),
+            )
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise FileNotFoundError(f"Object not found in store: {key}") from exc
@@ -134,8 +180,10 @@ class HTTPPresignedStore:
         url = self._object_url(key)
         req = urllib.request.Request(url, method="HEAD")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                return 200 <= int(resp.status) < 300
+            return self._request_with_retry(
+                req,
+                lambda resp: 200 <= int(resp.status) < 300,
+            )
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return False

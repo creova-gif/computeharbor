@@ -6,7 +6,7 @@ RUFF := $(VENV_BIN)/ruff
 BIN_DIR := bin
 BINARY := $(BIN_DIR)/computeharbor
 
-.PHONY: build test test-go test-py test-e2e lint chaos clean
+.PHONY: build test test-go test-py test-e2e lint bench chaos clean
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -36,6 +36,9 @@ lint:
 	go vet ./...
 	$(RUFF) check worker tests
 	$(MYPY) --strict worker/src worker/tests tests/chaos tests/e2e
+
+bench:
+	go test -run=^$$ -bench=. -benchmem ./pkg/cost ./pkg/orchestrator
 
 clean:
 	rm -rf $(BIN_DIR) .pytest_cache .mypy_cache .ruff_cache

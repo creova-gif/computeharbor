@@ -36,6 +36,9 @@ def test_three_preemptions_exact_jsonl_parity(tmp_path: Path) -> None:
     assert baseline_manifest.preempted is False
     assert baseline_manifest.processed_count == 50
     assert baseline_manifest.total_records == 50
+    assert baseline_manifest.elapsed_ms > 0.0
+    assert baseline_manifest.records_per_sec > 0.0
+    assert baseline_manifest.estimated_cost_per_million_records_usd > 0.0
 
     baseline_bytes = baseline_runner.output_path.read_bytes()
     baseline_lines = baseline_bytes.decode("utf-8").splitlines()

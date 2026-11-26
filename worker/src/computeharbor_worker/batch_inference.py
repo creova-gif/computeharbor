@@ -30,6 +30,12 @@ class BatchCursorManifest(BaseModel):
     preempted: bool = False
     numpy_rng_state_json: str
     flush_duration_ms: float = Field(ge=0.0)
+    elapsed_ms: float = Field(default=0.0, ge=0.0)
+    records_per_sec: float = Field(default=0.0, ge=0.0)
+    estimated_cost_per_million_records_usd: float = Field(default=0.0, ge=0.0)
+
+
+BatchRunSummary = BatchCursorManifest
 
 
 def _normalize_prompt(item: str | Mapping[str, Any]) -> str:
@@ -51,14 +57,18 @@ class BatchInferenceRunner:
         checkpoint_dir: Path | str,
         seed: int = 42,
         batch_size: int = 8,
+        spot_hourly_usd: float = 0.24,
     ) -> None:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if spot_hourly_usd < 0.0:
+            raise ValueError(f"spot_hourly_usd must be non-negative, got {spot_hourly_usd}")
         self.job_id = job_id
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.seed = seed
         self.batch_size = batch_size
+        self.spot_hourly_usd = spot_hourly_usd
         self.np_rng = np.random.default_rng(seed)
 
         self.output_path = self.checkpoint_dir / "output.jsonl"
@@ -125,12 +135,32 @@ class BatchInferenceRunner:
         }
         return json.dumps(record, separators=(",", ":")) + "\n"
 
-    def _flush(self, *, total_records: int, preempted: bool) -> BatchCursorManifest:
+    def _flush(
+        self,
+        *,
+        total_records: int,
+        preempted: bool,
+        elapsed_ms: float = 0.0,
+        records_in_run: int = 0,
+    ) -> BatchCursorManifest:
         t0 = time.perf_counter()
         output_bytes = "".join(self._lines).encode("utf-8")
         _atomic_write_bytes(self.output_path, output_bytes)
         output_sha256 = hashlib.sha256(output_bytes).hexdigest()
         flush_ms = round((time.perf_counter() - t0) * 1000.0, 4)
+
+        elapsed_ms_rounded = round(max(0.0, elapsed_ms), 4)
+        elapsed_sec = elapsed_ms_rounded / 1000.0
+        if records_in_run > 0 and elapsed_sec > 0.0:
+            records_per_sec = round(records_in_run / elapsed_sec, 4)
+            cost_per_sec = self.spot_hourly_usd / 3600.0
+            estimated_cost_per_million = round(
+                (1_000_000.0 / records_per_sec) * cost_per_sec,
+                6,
+            )
+        else:
+            records_per_sec = 0.0
+            estimated_cost_per_million = 0.0
 
         np_state_json = json.dumps(
             _encode_json_safe(self.np_rng.bit_generator.state),
@@ -144,6 +174,9 @@ class BatchInferenceRunner:
             preempted=preempted,
             numpy_rng_state_json=np_state_json,
             flush_duration_ms=flush_ms,
+            elapsed_ms=elapsed_ms_rounded,
+            records_per_sec=records_per_sec,
+            estimated_cost_per_million_records_usd=estimated_cost_per_million,
         )
         _atomic_write_bytes(
             self.manifest_path,
@@ -159,13 +192,14 @@ class BatchInferenceRunner:
         simulate_sigterm_at_index: int | None = None,
         ready_file: Path | None = None,
     ) -> BatchCursorManifest:
+        run_start = time.perf_counter()
         normalized_prompts = [_normalize_prompt(p) for p in prompts]
         total_records = len(normalized_prompts)
         self.restore_if_available()
 
+        start_idx = len(self._lines)
         preempted = False
         with PreemptionSignalGuard() as guard:
-            start_idx = len(self._lines)
             for batch_start in range(start_idx, total_records, self.batch_size):
                 batch_end = min(batch_start + self.batch_size, total_records)
                 for idx in range(batch_start, batch_end):
@@ -189,13 +223,28 @@ class BatchInferenceRunner:
 
                     if guard.preempt_requested:
                         preempted = True
-                        return self._flush(total_records=total_records, preempted=True)
+                        return self._flush(
+                            total_records=total_records,
+                            preempted=True,
+                            elapsed_ms=(time.perf_counter() - run_start) * 1000.0,
+                            records_in_run=len(self._lines) - start_idx,
+                        )
 
                 if guard.preempt_requested:
                     preempted = True
-                    return self._flush(total_records=total_records, preempted=True)
+                    return self._flush(
+                        total_records=total_records,
+                        preempted=True,
+                        elapsed_ms=(time.perf_counter() - run_start) * 1000.0,
+                        records_in_run=len(self._lines) - start_idx,
+                    )
 
-        return self._flush(total_records=total_records, preempted=preempted)
+        return self._flush(
+            total_records=total_records,
+            preempted=preempted,
+            elapsed_ms=(time.perf_counter() - run_start) * 1000.0,
+            records_in_run=len(self._lines) - start_idx,
+        )
 
 
 def _load_prompts(prompts_file: str, num_prompts: int) -> list[str | Mapping[str, Any]]:
@@ -222,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--num-prompts", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--spot-hourly-usd", type=float, default=0.24)
     parser.add_argument("--record-delay-sec", type=float, default=0.0)
     parser.add_argument("--ready-file", default="")
     parser.add_argument("--manifest-out", default="")
@@ -233,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_dir=Path(args.checkpoint_dir),
         seed=args.seed,
         batch_size=args.batch_size,
+        spot_hourly_usd=args.spot_hourly_usd,
     )
     ready_path = Path(args.ready_file) if args.ready_file else None
     manifest = runner.run(

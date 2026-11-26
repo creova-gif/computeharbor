@@ -39,6 +39,8 @@ func run(args []string, out io.Writer) error {
 			return runStatus(args[1:], out)
 		case "savings":
 			return runSavings(args[1:], out)
+		case "billing":
+			return runBilling(args[1:], out)
 		}
 	}
 

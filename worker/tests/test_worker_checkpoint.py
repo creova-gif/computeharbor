@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import numpy as np
@@ -79,3 +80,63 @@ def test_in_process_three_preemptions_bit_for_bit_parity(tmp_path: Path) -> None
     assert recovered.summary.adapter_b_sha256 == baseline.summary.adapter_b_sha256
     np.testing.assert_array_equal(recovered.lora_a, baseline.lora_a)
     np.testing.assert_array_equal(recovered.lora_b, baseline.lora_b)
+
+
+def test_checkpoint_retention_prunes_oldest_and_restores_latest(tmp_path: Path) -> None:
+    mgr = CheckpointManager(tmp_path, max_checkpoints=2)
+    cfg = LoRAConfig()
+    py_rng = random.Random(42)
+    np_rng = np.random.default_rng(42)
+
+    for step in range(1, 6):
+        tensors = {"lora_a": np.full((2, 2), float(step), dtype=np.float64)}
+        mgr.save(
+            job_id="job-retention",
+            step=step,
+            epoch=0,
+            loss_history=[1.0 / step],
+            lora_config=cfg,
+            tensors=tensors,
+            py_rng_state=py_rng.getstate(),
+            np_rng_state=np_rng.bit_generator.state,
+        )
+
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == [
+        "latest.json",
+        "step-000004.manifest.json",
+        "step-000004.safetensors",
+        "step-000005.manifest.json",
+        "step-000005.safetensors",
+    ]
+
+    manifest, tensors, _, _ = mgr.load_latest()
+    assert manifest.step == 5
+    np.testing.assert_array_equal(tensors["lora_a"], np.full((2, 2), 5.0, dtype=np.float64))
+
+
+def test_checkpoint_retention_unlimited_when_zero(tmp_path: Path) -> None:
+    mgr = CheckpointManager(tmp_path, max_checkpoints=0)
+    cfg = LoRAConfig()
+    py_rng = random.Random(7)
+    np_rng = np.random.default_rng(7)
+
+    for step in range(1, 6):
+        mgr.save(
+            job_id="job-unlimited",
+            step=step,
+            epoch=0,
+            loss_history=[0.5],
+            lora_config=cfg,
+            tensors={"lora_a": np.ones((2, 2), dtype=np.float64)},
+            py_rng_state=py_rng.getstate(),
+            np_rng_state=np_rng.bit_generator.state,
+        )
+
+    assert len(list(tmp_path.glob("step-*.manifest.json"))) == 5
+    assert mgr.prune_old_checkpoints() == 0
+
+
+def test_checkpoint_manager_negative_max_checkpoints_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_checkpoints"):
+        CheckpointManager(tmp_path, max_checkpoints=-1)

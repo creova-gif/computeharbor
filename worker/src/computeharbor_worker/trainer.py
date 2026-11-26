@@ -67,10 +67,15 @@ class LoRATrainer:
         config: LoRAConfig,
         checkpoint_dir: Path | str,
         remote_store: CheckpointStore | None = None,
+        max_checkpoints: int = 5,
     ) -> None:
         self.job_id = job_id
         self.config = config
-        self.checkpoint_mgr = CheckpointManager(checkpoint_dir, remote_store=remote_store)
+        self.checkpoint_mgr = CheckpointManager(
+            checkpoint_dir,
+            remote_store=remote_store,
+            max_checkpoints=max_checkpoints,
+        )
 
         base_rng = np.random.default_rng(config.base_seed)
         self.frozen_weight: FloatArray = base_rng.standard_normal(
@@ -268,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ready-file", default="")
     parser.add_argument("--summary-out", default="")
     parser.add_argument("--remote-store-dir", default="")
+    parser.add_argument("--max-checkpoints", type=int, default=5)
     args = parser.parse_args(argv)
 
     remote_store: CheckpointStore | None = (
@@ -278,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         config=LoRAConfig(),
         checkpoint_dir=Path(args.checkpoint_dir),
         remote_store=remote_store,
+        max_checkpoints=args.max_checkpoints,
     )
     ready_path = Path(args.ready_file) if args.ready_file else None
     result = trainer.train(

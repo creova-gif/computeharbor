@@ -39,7 +39,7 @@ Limiter: `os.fsync` syscall latency on the local APFS volume for the Safetensors
 
 ## HTTP Control Plane API
 
-Start the control plane with `go run ./control-plane/cmd/computeharbor serve -addr :8080` (supports `-reap-interval` and `-lease-ttl`). Tenant-scoped job endpoints require the `X-Org-ID` request header (except `POST /v1/jobs`, which reads `org_id` from the JSON body).
+Start the control plane with `go run ./control-plane/cmd/computeharbor serve -addr :8080 -state-file /tmp/computeharbor-state.json` (supports `-reap-interval`, `-lease-ttl`, and `-state-file` for atomic coordinator JSON snapshot persistence across restarts). Tenant-scoped job endpoints require the `X-Org-ID` request header (except `POST /v1/jobs`, which reads `org_id` from the JSON body).
 
 | Method & Path | Auth / Headers | Request / Query | Response |
 | --- | --- | --- | --- |
@@ -69,13 +69,29 @@ PYTHONPATH=worker/src .venv/bin/python -m computeharbor_worker.daemon \
   --heartbeat-interval-sec 0.5
 ```
 
-Optional flags: `--step-delay-sec`, `--ready-file`, `--summary-out`, and `--remote-store-dir`.
+Optional flags:
+- `--remote-store-dir`: Replicate committed Safetensors and manifest files to a local object-store mirror directory.
+- `--metadata-provider gcp|aws`: Poll GCP (`metadata.google.internal`) or AWS (`169.254.169.254`) spot preemption metadata endpoints and send `SIGTERM` to the worker on notice (with `--metadata-url` and `--metadata-poll-sec` overrides).
+- `--step-delay-sec`, `--ready-file`, `--summary-out`: Training cadence, readiness probe path, and JSON summary output path.
 
 Run the end-to-end Go control-plane + Python worker daemon tests (including `SIGTERM` preemption recovery):
 
 ```bash
 make test-e2e
 ```
+
+## Container Deployment
+
+Run the control plane and Prometheus locally with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+- [`docker-compose.yml`](docker-compose.yml): Starts `control-plane` on `:8080` (with `/healthz` healthcheck) and `prometheus` (`prom/prometheus:v2.55.1`) on `:9090`.
+- [`Dockerfile`](Dockerfile): Multi-stage `golang:1.23-alpine` -> `gcr.io/distroless/static-debian12:nonroot` build for the `computeharbor` control plane (`serve -addr :8080`).
+- [`Dockerfile.worker`](Dockerfile.worker): `python:3.12-slim` image installing `computeharbor_worker` with entrypoint `python -m computeharbor_worker.daemon`.
+- [`deploy/prometheus.yml`](deploy/prometheus.yml): Scrapes `control-plane:8080/metrics` every `5s`.
 
 ## Reproduce all checks
 
@@ -85,8 +101,8 @@ make test-e2e
 	make test
 	make chaos
 
-	# Start the Go HTTP control plane
-	go run ./control-plane/cmd/computeharbor serve -addr :8080
+	# Start the Go HTTP control plane with snapshot persistence
+	go run ./control-plane/cmd/computeharbor serve -addr :8080 -state-file /tmp/computeharbor-state.json
 
 	# Rank spot GPU pools with >= 24 GB VRAM
 	go run ./control-plane/cmd/computeharbor -rank-vram 24 -count 4 -hours 24 -fee 0.12

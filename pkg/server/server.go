@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
@@ -33,6 +34,8 @@ type Server struct {
 	limiter      *OrgRateLimiter
 	apiKey       string
 	webhookStats WebhookStats
+	barrierMu    sync.Mutex
+	barriers     map[string]*orchestrator.RingBarrier
 }
 
 // New constructs a Server wrapping the provided Coordinator.
@@ -42,8 +45,9 @@ func New(coord *orchestrator.Coordinator) *Server {
 		coord = orchestrator.NewCoordinator()
 	}
 	s := &Server{
-		coord: coord,
-		mux:   http.NewServeMux(),
+		coord:    coord,
+		mux:      http.NewServeMux(),
+		barriers: make(map[string]*orchestrator.RingBarrier),
 	}
 	s.registerRoutes()
 	return s
@@ -158,6 +162,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v1/jobs/{id}/heartbeat", s.handleHeartbeat)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/sigterm", s.handleNotifySIGTERM)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/checkpoint", s.handleCommitCheckpoint)
+	s.mux.HandleFunc("POST /v1/jobs/{id}/barrier", s.handleBarrier)
 	s.mux.HandleFunc("POST /v1/jobs/{id}/cancel", s.handleCancelJob)
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
 	s.mux.HandleFunc("GET /v1/fleet/rank", s.handleRankFleet)

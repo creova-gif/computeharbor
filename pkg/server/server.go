@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creova-gif/computeharbor/pkg/cost"
@@ -34,6 +35,7 @@ type Server struct {
 	limiter      *OrgRateLimiter
 	apiKey       string
 	webhookStats WebhookStats
+	draining     atomic.Bool
 	barrierMu    sync.Mutex
 	barriers     map[string]*orchestrator.RingBarrier
 }
@@ -77,6 +79,17 @@ func (s *Server) WithWebhookStats(stats WebhookStats) *Server {
 	return s
 }
 
+// SetDraining marks the server as draining (true) or ready (false) for /readyz
+// readiness probes.
+func (s *Server) SetDraining(v bool) {
+	s.draining.Store(v)
+}
+
+// IsDraining reports whether the server is currently draining.
+func (s *Server) IsDraining() bool {
+	return s.draining.Load()
+}
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var handler http.Handler = s.mux
@@ -90,6 +103,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		handler = LoggingMiddleware(s.logger, handler)
 	}
 	handler = SecurityHeadersMiddleware(handler)
+	handler = RequestIDMiddleware(handler)
 	handler.ServeHTTP(w, r)
 }
 
@@ -155,6 +169,7 @@ func (s *Server) StartSnapshotter(ctx context.Context, path string, interval tim
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /ui", s.handleUI)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /v1/jobs", s.handleListJobs)
 	s.mux.HandleFunc("POST /v1/jobs", s.handleSubmitJob)
@@ -232,6 +247,14 @@ func toJobLeaseResponse(lease orchestrator.JobLease) jobLeaseResponse {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
+	if s.IsDraining() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {

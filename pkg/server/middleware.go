@@ -1,7 +1,11 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -9,10 +13,15 @@ import (
 	"time"
 )
 
+type contextKey string
+
 const (
-	defaultOrgID  = "anonymous"
-	maxBuckets    = 10000
-	bucketIdleTTL = 10 * time.Minute
+	defaultOrgID                  = "anonymous"
+	maxBuckets                    = 10000
+	bucketIdleTTL                 = 10 * time.Minute
+	maxRequestIDLength            = 128
+	requestIDHeader               = "X-Request-ID"
+	requestIDKey       contextKey = "request_id"
 )
 
 // statusRecorder wraps http.ResponseWriter to capture the HTTP status code
@@ -51,8 +60,54 @@ func orgIDFromRequest(r *http.Request) string {
 	return orgID
 }
 
+// RequestIDFromContext returns the correlation request ID stored in ctx by
+// RequestIDMiddleware, or an empty string if none is present.
+func RequestIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(requestIDKey).(string)
+	return id
+}
+
+func isValidRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x20 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func generateRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%032x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// RequestIDMiddleware ensures every HTTP request has a valid X-Request-ID
+// correlation identifier. Valid incoming X-Request-ID headers (printable ASCII,
+// <= 128 bytes) are preserved; otherwise a fresh 16-byte hex ID is generated.
+// The ID is set on the response header and attached to the request context.
+func RequestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := strings.TrimSpace(r.Header.Get(requestIDHeader))
+		if !isValidRequestID(reqID) {
+			reqID = generateRequestID()
+		}
+		w.Header().Set(requestIDHeader, reqID)
+		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // LoggingMiddleware logs each HTTP request as a structured slog record with
-// method, path, status, duration_ms, and org_id.
+// method, path, status, duration_ms, org_id, and request_id (when present).
 func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	if logger == nil {
 		return next
@@ -65,13 +120,17 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(rec, r)
 
-		logger.Info("http request",
+		attrs := []any{
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", rec.status),
 			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
 			slog.String("org_id", orgIDFromRequest(r)),
-		)
+		}
+		if reqID := RequestIDFromContext(r.Context()); reqID != "" {
+			attrs = append(attrs, slog.String("request_id", reqID))
+		}
+		logger.Info("http request", attrs...)
 	})
 }
 
@@ -169,14 +228,15 @@ func (l *OrgRateLimiter) evict(now time.Time) {
 }
 
 // BearerAuthMiddleware enforces constant-time Bearer token authentication when
-// apiKey is non-empty, skipping GET /healthz and GET /ui for probes and console access.
+// apiKey is non-empty, skipping GET /healthz, GET /readyz, and GET /ui for
+// probes and console access.
 func BearerAuthMiddleware(apiKey string, next http.Handler) http.Handler {
 	if apiKey == "" {
 		return next
 	}
 	expected := []byte(apiKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/ui") {
+		if r.Method == http.MethodGet && (r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/ui") {
 			next.ServeHTTP(w, r)
 			return
 		}

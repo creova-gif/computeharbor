@@ -274,6 +274,40 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  /v1/jobs/{id}/barrier:
+    parameters:
+      - $ref: "#/components/parameters/JobIDPath"
+      - $ref: "#/components/parameters/OrgIDHeader"
+    post:
+      tags: [Jobs]
+      summary: Commit a distributed ring-barrier step for a worker rank
+      operationId: commitBarrier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BarrierRequest"
+      responses:
+        "200":
+          description: Barrier rank committed and current consensus state returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BarrierResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   /v1/schedule:
     post:
       tags: [Scheduling]
@@ -416,6 +450,12 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
 
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Optional Bearer API key configured via `-api-key` or `COMPUTEHARBOR_API_KEY`
+
   parameters:
     OrgIDHeader:
       name: X-Org-ID
@@ -821,3 +861,40 @@ components:
         currency:
           type: string
           default: USD
+
+    BarrierRequest:
+      type: object
+      required: [world_size, rank, step]
+      properties:
+        world_size:
+          type: integer
+          minimum: 1
+        rank:
+          type: integer
+          minimum: 0
+        step:
+          type: integer
+          minimum: 0
+
+    BarrierResponse:
+      type: object
+      required:
+        - job_id
+        - step
+        - rank
+        - world_size
+        - all_ready
+        - committed_step
+      properties:
+        job_id:
+          type: string
+        step:
+          type: integer
+        rank:
+          type: integer
+        world_size:
+          type: integer
+        all_ready:
+          type: boolean
+        committed_step:
+          type: integer

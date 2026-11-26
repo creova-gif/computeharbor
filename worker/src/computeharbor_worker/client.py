@@ -226,3 +226,22 @@ class ControlPlaneClient:
             payload=payload,
             include_org_header=False,
         )
+
+    def barrier(
+        self,
+        job_id: str,
+        *,
+        world_size: int,
+        rank: int,
+        step: int,
+    ) -> dict[str, Any]:
+        """Coordinate a distributed ring-barrier step via POST /v1/jobs/{id}/barrier."""
+        return self._request(
+            "POST",
+            f"/v1/jobs/{job_id}/barrier",
+            payload={
+                "world_size": world_size,
+                "rank": rank,
+                "step": step,
+            },
+        )

@@ -104,6 +104,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /v1/cost/rank", s.handleRankCost)
 	s.mux.HandleFunc("GET /v1/fleet/rank", s.handleRankFleet)
 	s.mux.HandleFunc("POST /v1/schedule", s.handleSchedule)
+	s.mux.HandleFunc("GET /v1/billing/summary", s.handleBillingSummary)
 }
 
 type errorResponse struct {
